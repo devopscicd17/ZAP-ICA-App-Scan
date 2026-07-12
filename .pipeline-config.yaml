@@ -1,1 +1,300 @@
+# Example Pipeline Configuration for ZAP Authenticated Scan
+# This file demonstrates how to integrate ZAP authenticated scanning
+# for ICA applications into your IBM Cloud Toolchain pipeline
+#
+# Copy the relevant sections to your .pipeline-config.yaml file
 
+version: '1'
+
+# =============================================================================
+# Option 1: Dedicated ICA Security Scan Stage
+# =============================================================================
+# Use this for a standalone security scan stage
+
+ica-security-scan:
+  dind: true
+  abort_on_failure: false  # Set to true to fail pipeline on security issues
+  image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:3.61
+  script: |
+    #!/usr/bin/env bash
+    
+    if [[ "$PIPELINE_DEBUG" == 1 ]]; then
+      env
+      set -x
+    fi
+    
+    # Get credentials from secure properties
+    export ICA_APP_URL="$(get_env app-url)"
+    export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
+    export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+    
+    # Optional: Configure scan parameters
+    export ZAP_SCAN_TIMEOUT="60"           # Scan timeout in minutes
+    export ZAP_ALERT_THRESHOLD="MEDIUM"    # Fail on MEDIUM or higher
+    export ZAP_MAX_DEPTH="5"               # Spider crawl depth
+    export ZAP_THREAD_COUNT="5"            # Number of scan threads
+    
+    # Run the authenticated scan
+    cd "$WORKSPACE/$(load_repo app-repo path)"
+    source scripts/ci-cd/zap/run-ica-authenticated-scan.sh
+
+# =============================================================================
+# Option 2: Modified Dynamic Scan Stage
+# =============================================================================
+# Use this to replace or enhance your existing dynamic-scan stage
+
+dynamic-scan:
+  dind: true
+  abort_on_failure: false
+  image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:3.61
+  script: |
+    #!/usr/bin/env bash
+    
+    if [[ "$PIPELINE_DEBUG" == 1 ]]; then
+      env
+      set -x
+    fi
+    
+    # Check if dynamic scan is enabled
+    if [ -z "$(get_env opt-in-dynamic-scan "")" ]; then
+      echo "Dynamic scan not enabled. Set 'opt-in-dynamic-scan' to enable."
+      exit 0
+    fi
+    
+    # Determine scan type
+    if [ "$(get_env use-ica-authenticated-scan "")" == "true" ]; then
+      echo "Running ICA authenticated scan..."
+      
+      export ICA_APP_URL="$(get_env app-url)"
+      export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
+      export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+      export ZAP_SCAN_TIMEOUT="60"
+      export ZAP_ALERT_THRESHOLD="MEDIUM"
+      
+      cd "$WORKSPACE/$(load_repo app-repo path)"
+      source scripts/ci-cd/zap/run-ica-authenticated-scan.sh
+    else
+      echo "Running standard ZAP scan..."
+      
+      # Standard ZAP scan (existing implementation)
+      ${COMMONS_PATH}/dynamic-scan/trigger-async-zap.sh \
+        --api "definitions/definitions.json,public/swagger.yaml" \
+        --ui "scripts/ci-cd/zap/uiscripts/run.sh" \
+        --environment-setup "scripts/ci-cd/zap/zap-custom-scripts/.env.dynamic-scan.sh" \
+        --scope "" \
+        --repo-key "app-repo" \
+        --evidence-type "com.ibm.dynamic_scan"
+    fi
+
+# =============================================================================
+# Option 3: Environment-Specific Scan
+# =============================================================================
+# Use this to run scans only in specific environments
+
+staging-security-scan:
+  dind: true
+  abort_on_failure: false
+  image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:3.61
+  script: |
+    #!/usr/bin/env bash
+    
+    # Only run in staging environment
+    if [[ "$(get_env target-environment)" != "staging" ]]; then
+      echo "Skipping security scan for $(get_env target-environment) environment"
+      exit 0
+    fi
+    
+    echo "Running security scan for staging environment..."
+    
+    export ICA_APP_URL="$(get_env app-url)"
+    export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
+    export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+    
+    # Staging-specific configuration
+    export ZAP_SCAN_TIMEOUT="90"
+    export ZAP_ALERT_THRESHOLD="LOW"
+    export ZAP_MAX_DEPTH="7"
+    
+    cd "$WORKSPACE/$(load_repo app-repo path)"
+    source scripts/ci-cd/zap/run-ica-authenticated-scan.sh
+
+production-security-scan:
+  dind: true
+  abort_on_failure: true  # Fail pipeline on production issues
+  image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:3.61
+  script: |
+    #!/usr/bin/env bash
+    
+    # Only run in production environment
+    if [[ "$(get_env target-environment)" != "production" ]]; then
+      echo "Skipping security scan for $(get_env target-environment) environment"
+      exit 0
+    fi
+    
+    echo "Running security scan for production environment..."
+    
+    export ICA_APP_URL="$(get_env app-url)"
+    export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
+    export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+    
+    # Production-specific configuration (stricter)
+    export ZAP_SCAN_TIMEOUT="120"
+    export ZAP_ALERT_THRESHOLD="HIGH"
+    export ZAP_MAX_DEPTH="5"
+    
+    cd "$WORKSPACE/$(load_repo app-repo path)"
+    source scripts/ci-cd/zap/run-ica-authenticated-scan.sh
+
+# =============================================================================
+# Option 4: Scheduled Security Scan
+# =============================================================================
+# Use this for periodic security scans (configure trigger separately)
+
+scheduled-security-scan:
+  dind: true
+  abort_on_failure: false
+  image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:3.61
+  script: |
+    #!/usr/bin/env bash
+    
+    echo "Running scheduled security scan..."
+    
+    # Get target environment from trigger or default to staging
+    TARGET_ENV="${TARGET_ENVIRONMENT:-staging}"
+    
+    # Set environment-specific app URL
+    case "${TARGET_ENV}" in
+      dev)
+        export ICA_APP_URL="https://dev-app.ibm.com"
+        ;;
+      staging)
+        export ICA_APP_URL="https://staging-app.ibm.com"
+        ;;
+      production)
+        export ICA_APP_URL="https://prod-app.ibm.com"
+        ;;
+      *)
+        echo "Unknown environment: ${TARGET_ENV}"
+        exit 1
+        ;;
+    esac
+    
+    export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
+    export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+    export ZAP_SCAN_TIMEOUT="120"
+    export ZAP_ALERT_THRESHOLD="MEDIUM"
+    
+    cd "$WORKSPACE/$(load_repo app-repo path)"
+    source scripts/ci-cd/zap/run-ica-authenticated-scan.sh
+
+# =============================================================================
+# Option 5: Multi-Application Scan
+# =============================================================================
+# Use this to scan multiple ICA applications in sequence
+
+multi-app-security-scan:
+  dind: true
+  abort_on_failure: false
+  image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:3.61
+  script: |
+    #!/usr/bin/env bash
+    
+    echo "Running multi-application security scan..."
+    
+    # Define applications to scan
+    declare -a ICA_APPS=(
+      "https://app1.ibm.com"
+      "https://app2.ibm.com"
+      "https://app3.ibm.com"
+    )
+    
+    export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
+    export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+    
+    # Scan each application
+    SCAN_FAILED=0
+    for app_url in "${ICA_APPS[@]}"; do
+      echo "Scanning application: ${app_url}"
+      
+      export ICA_APP_URL="${app_url}"
+      export ZAP_SCAN_TIMEOUT="45"
+      export ZAP_ALERT_THRESHOLD="MEDIUM"
+      export ZAP_MAX_DEPTH="4"
+      
+      cd "$WORKSPACE/$(load_repo app-repo path)"
+      
+      if ! source scripts/ci-cd/zap/run-ica-authenticated-scan.sh; then
+        echo "Scan failed for ${app_url}"
+        SCAN_FAILED=1
+      fi
+    done
+    
+    if [[ ${SCAN_FAILED} -eq 1 ]]; then
+      echo "One or more application scans failed"
+      exit 1
+    fi
+    
+    echo "All application scans completed successfully"
+
+# =============================================================================
+# Option 6: Conditional Scan Based on Changes
+# =============================================================================
+# Use this to run scans only when specific files change
+
+conditional-security-scan:
+  dind: true
+  abort_on_failure: false
+  image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:3.61
+  script: |
+    #!/usr/bin/env bash
+    
+    cd "$WORKSPACE/$(load_repo app-repo path)"
+    
+    # Check if security-sensitive files changed
+    CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+    
+    if echo "${CHANGED_FILES}" | grep -qE "(server/|routes/|auth/|security/)"; then
+      echo "Security-sensitive files changed, running scan..."
+      
+      export ICA_APP_URL="$(get_env app-url)"
+      export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
+      export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+      export ZAP_SCAN_TIMEOUT="60"
+      export ZAP_ALERT_THRESHOLD="MEDIUM"
+      
+      source scripts/ci-cd/zap/run-ica-authenticated-scan.sh
+    else
+      echo "No security-sensitive files changed, skipping scan"
+    fi
+
+# =============================================================================
+# Required Pipeline Properties
+# =============================================================================
+# Add these to your IBM Cloud Toolchain Secure Properties:
+#
+# ibm-sso-username: your-email@ibm.com
+# ibm-sso-password: your-secure-password
+# app-url: https://your-ica-app.ibm.com
+#
+# Optional properties:
+# opt-in-dynamic-scan: true
+# use-ica-authenticated-scan: true
+# target-environment: staging|production
+
+# =============================================================================
+# Pipeline Triggers (Configure in Toolchain UI)
+# =============================================================================
+# 
+# Git Trigger:
+#   - Trigger on: Push to main/master branch
+#   - Run stage: ica-security-scan
+#
+# Timed Trigger:
+#   - Schedule: Daily at 2:00 AM
+#   - Run stage: scheduled-security-scan
+#
+# Manual Trigger:
+#   - Name: Security Scan
+#   - Run stage: ica-security-scan
+
+# Made with Bob
