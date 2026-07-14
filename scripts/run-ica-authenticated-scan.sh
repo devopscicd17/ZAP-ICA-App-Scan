@@ -143,27 +143,44 @@ setup_environment() {
 }
 
 # =============================================================================
-# Step 2 — Pull the ZAP Docker image
+# Step 2 — Verify Docker is available and the socket is accessible
 # =============================================================================
 setup_zap_docker() {
     log_info "Checking Docker availability..."
-    if ! command -v docker &> /dev/null; then
-        log_error "Docker is not available. Ensure the pipeline stage has 'dind: true'."
-        return 1
-    fi
-    log_info "Docker: $(docker --version)"
 
-    local image="${ZAP_DOCKER_IMAGE:-ghcr.io/zaproxy/zaproxy:stable}"
-    log_info "Pulling ZAP image: ${image}"
-    if ! docker pull "${image}"; then
-        log_error "Failed to pull ZAP Docker image: ${image}"
+    if ! command -v docker &>/dev/null; then
+        log_error "Docker binary not found."
+        log_error ""
+        log_error "Classic Pipeline fix:"
+        log_error "  Stage → Jobs tab → your job → Builder type → set to 'Docker image'"
+        log_error "  OR: Stage → Workers tab → enable 'Use Docker'"
+        log_error ""
+        log_error "Tekton / .pipeline-config.yaml fix:"
+        log_error "  Add  dind: true  to the stage definition."
         return 1
     fi
-    log_success "ZAP Docker image ready"
+
+    # Test the socket — 'docker info' fails immediately if the daemon is not running
+    if ! docker info &>/dev/null; then
+        log_error "Docker binary found ($(docker --version)) but the daemon is not accessible."
+        log_error ""
+        log_error "Classic Pipeline fix:"
+        log_error "  1. Open your Toolchain → Pipeline → Stage settings"
+        log_error "  2. Go to the 'Workers' tab"
+        log_error "  3. Check 'Enable Docker'"
+        log_error "  OR change the job 'Builder type' to a Docker-based builder."
+        log_error ""
+        log_error "Tekton / .pipeline-config.yaml fix:"
+        log_error "  Add  dind: true  to the ica-security-scan stage."
+        return 1
+    fi
+
+    log_info "Docker: $(docker --version)"
+    log_success "Docker daemon accessible"
 }
 
 # =============================================================================
-# Step 3 — Execute the full scan script
+# Step 3 — Execute the full scan (daemon + spider + active scan + reports)
 # =============================================================================
 run_zap_scan() {
     local scan_script="${SCRIPT_DIR}/zap-full-scan-authenticated.sh"
