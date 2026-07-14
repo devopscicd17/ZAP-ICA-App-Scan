@@ -6,7 +6,23 @@
 # Environment Configuration for ZAP Authenticated Scan of ICA Applications
 # This file configures ZAP for authenticated scanning of IBM Consulting Advantage apps
 #
+#!/usr/bin/env bash
 
+# Compatibility for IBM Continuous Delivery
+
+if ! command -v set_env >/dev/null 2>&1; then
+    set_env() {
+        export "$1=$2"
+    }
+fi
+
+if ! command -v get_env >/dev/null 2>&1; then
+    get_env() {
+        local var="$1"
+        local default="${2:-}"
+        printenv "$var" || echo "$default"
+    }
+fi
 # =============================================================================
 # IBM SSO Authentication Configuration
 # =============================================================================
