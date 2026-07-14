@@ -284,47 +284,59 @@ ica-security-scan:
   image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:3.61
   script: |
     #!/usr/bin/env bash
+    set -eo pipefail
 
     if [[ "$PIPELINE_DEBUG" == 1 ]]; then
-      env
-      set -x
+      trap 'echo "[TRACE] line $LINENO: $BASH_COMMAND"' DEBUG
     fi
 
-    # Skip stage if not opted in (IBM Toolchain property names use underscores)
-    if [ -z "$(get_env opt_in_ica_scan "")" ]; then
+    # ---------------------------------------------------------------------------
+    # Skip stage if not opted in.
+    # IBM Toolchain property names MUST use underscores — dashes silently return "".
+    # ---------------------------------------------------------------------------
+    _OPT_IN="$(get_env opt_in_ica_scan "")"
+    if [[ -z "${_OPT_IN}" ]]; then
       echo "[INFO] ICA authenticated scan not enabled."
       echo "[INFO] Add pipeline property 'opt_in_ica_scan' with any value to enable."
       exit 0
     fi
 
     # ---------------------------------------------------------------------------
-    # Credentials — pulled from Toolchain Secure Properties
-    # NOTE: IBM Cloud Toolchain only supports underscores in property names.
+    # Resolve credentials — all property names use underscores.
     # ---------------------------------------------------------------------------
     export ICA_APP_URL="$(get_env app_url "")"
     export IBM_SSO_USERNAME="$(get_env ibm_sso_username "")"
 
-    # Retrieve password with set -x disabled to avoid logging it
-    set +x
-    export IBM_SSO_PASSWORD="$(get_env ibm_sso_password "")"
-    if [[ "$PIPELINE_DEBUG" == 1 ]]; then set -x; fi
+    # Password retrieved outside of any trace/debug output to prevent logging.
+    _PASS="$(get_env ibm_sso_password "")"
+    export IBM_SSO_PASSWORD="${_PASS}"
+    unset _PASS
 
-    # Validate required variables before going further
-    if [[ -z "${ICA_APP_URL}" ]]; then
-      echo "[ERROR] app_url is not set. Add it as a Toolchain Secure Property named 'app_url'." >&2
-      exit 1
-    fi
-    if [[ -z "${IBM_SSO_USERNAME}" ]]; then
-      echo "[ERROR] ibm_sso_username is not set. Add it as a Toolchain Secure Property." >&2
-      exit 1
-    fi
-    if [[ -z "${IBM_SSO_PASSWORD}" ]]; then
-      echo "[ERROR] ibm_sso_password is not set. Add it as a Toolchain Secure Property." >&2
+    # ---------------------------------------------------------------------------
+    # Validate — fail fast with actionable messages before running anything.
+    # ---------------------------------------------------------------------------
+    _MISSING=""
+    [[ -z "${ICA_APP_URL}"      ]] && _MISSING="${_MISSING}\n  app_url           (Target ICA application URL)"
+    [[ -z "${IBM_SSO_USERNAME}" ]] && _MISSING="${_MISSING}\n  ibm_sso_username  (IBM w3id email)"
+    [[ -z "${IBM_SSO_PASSWORD}" ]] && _MISSING="${_MISSING}\n  ibm_sso_password  (IBM w3id password)"
+
+    if [[ -n "${_MISSING}" ]]; then
+      echo "" >&2
+      echo "================================================================" >&2
+      echo " ERROR: Required Toolchain Secure Properties are not set:" >&2
+      printf "${_MISSING}\n" >&2
+      echo "" >&2
+      echo " In IBM Cloud Toolchain UI:" >&2
+      echo "   1. Open your Toolchain → Pipeline → Settings" >&2
+      echo "   2. Click 'Secure Properties' (or 'Environment properties')" >&2
+      echo "   3. Add each missing property listed above" >&2
+      echo "   Note: Property names must use underscores, not dashes." >&2
+      echo "================================================================" >&2
       exit 1
     fi
 
     # ---------------------------------------------------------------------------
-    # Optional scan tuning (all names use underscores)
+    # Optional scan tuning (all names use underscores).
     # ---------------------------------------------------------------------------
     export ZAP_SCAN_TIMEOUT="$(get_env zap_scan_timeout "60")"
     export ZAP_ALERT_THRESHOLD="$(get_env zap_alert_threshold "MEDIUM")"
@@ -332,7 +344,23 @@ ica-security-scan:
     export ZAP_DOCKER_IMAGE="$(get_env zap_docker_image "ghcr.io/zaproxy/zaproxy:stable")"
 
     # ---------------------------------------------------------------------------
-    # Run the authenticated scan
+    # Locate scan scripts.
+    # This repo IS the pipeline config repo; PIPELINE_CONFIG_REPO_PATH holds its
+    # relative path inside $WORKSPACE when set by the Toolchain runner.
     # ---------------------------------------------------------------------------
-    cd "$WORKSPACE/$(load_repo app-repo path)"
-    source scripts/run-ica-authenticated-scan.sh
+    if [[ -n "${PIPELINE_CONFIG_REPO_PATH:-}" ]]; then
+      cd "$WORKSPACE/${PIPELINE_CONFIG_REPO_PATH}"
+    else
+      cd "$WORKSPACE"
+    fi
+
+    if [[ ! -f "scripts/run-ica-authenticated-scan.sh" ]]; then
+      echo "[ERROR] scripts/run-ica-authenticated-scan.sh not found in $(pwd)" >&2
+      echo "[ERROR] Expected to be in: ${WORKSPACE}/${PIPELINE_CONFIG_REPO_PATH:-}" >&2
+      exit 1
+    fi
+
+    # ---------------------------------------------------------------------------
+    # Run the authenticated scan (all required vars already exported above).
+    # ---------------------------------------------------------------------------
+    bash scripts/run-ica-authenticated-scan.sh
