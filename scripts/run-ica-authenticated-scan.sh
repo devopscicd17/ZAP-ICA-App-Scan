@@ -8,9 +8,12 @@
 #     dind: true
 #     script: |
 #       #!/usr/bin/env bash
-#       export ICA_APP_URL="$(get_env app-url)"
-#       export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
-#       export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+#       # IBM Toolchain Secure Properties must use underscores (not dashes)
+#       export ICA_APP_URL="$(get_env app_url "")"
+#       export IBM_SSO_USERNAME="$(get_env ibm_sso_username "")"
+#       set +x
+#       export IBM_SSO_PASSWORD="$(get_env ibm_sso_password "")"
+#       set -x
 #       cd "$WORKSPACE/$(load_repo app-repo path)"
 #       source scripts/run-ica-authenticated-scan.sh
 #
@@ -42,68 +45,58 @@ WORKSPACE_DIR="${WORKSPACE:-$(pwd)}"
 # Step 1 — Load environment configuration
 # =============================================================================
 setup_environment() {
-    log_info "Loading ICA authenticated scan environment configuration..."
-
+    # ------------------------------------------------------------------
+    # Source the defaults file FIRST so its values can be overridden below.
+    # NOTE: The .env file must NOT call get_env — it uses plain bash exports.
+    # ------------------------------------------------------------------
     local env_file="${SCRIPT_DIR}/zap-custom-scripts/.env.ica-authenticated-scan.sh"
     if [[ -f "${env_file}" ]]; then
         # shellcheck disable=SC1090
         source "${env_file}"
-        log_success "Environment configuration loaded"
-    else
-        log_warning "Optional env file not found: ${env_file} — using defaults"
+        log_info "Defaults loaded from: ${env_file}"
     fi
 
     # ------------------------------------------------------------------
-    # Resolve ICA_APP_URL
+    # IBM Cloud Toolchain only supports underscores in property names.
+    # All get_env calls use underscore keys exclusively.
+    # Variables exported by the pipeline stage take precedence over get_env.
     # ------------------------------------------------------------------
-    if [[ -z "${ICA_APP_URL:-}" ]]; then
-        # Try IBM Toolchain pipeline variable
-        if command -v get_env &> /dev/null; then
-            ICA_APP_URL="$(get_env app-url "")"
-            [[ -z "${ICA_APP_URL}" ]] && ICA_APP_URL="$(get_env app_url "")"
-        fi
+
+    # ICA_APP_URL
+    if [[ -z "${ICA_APP_URL:-}" ]] && command -v get_env &> /dev/null; then
+        ICA_APP_URL="$(get_env app_url "")"
     fi
     if [[ -z "${ICA_APP_URL:-}" ]]; then
         log_error "ICA_APP_URL is not set."
-        log_error "  Option A: export ICA_APP_URL='https://your-ica-app.ibm.com'"
-        log_error "  Option B: add 'app-url' secure property to your toolchain"
+        log_error "  In Toolchain Secure Properties add:  app_url = https://your-ica-app.ibm.com"
+        log_error "  Or set:  export ICA_APP_URL='https://your-ica-app.ibm.com'  before sourcing"
         return 1
     fi
     export ICA_APP_URL
 
-    # ------------------------------------------------------------------
-    # Resolve IBM_SSO_USERNAME
-    # ------------------------------------------------------------------
-    if [[ -z "${IBM_SSO_USERNAME:-}" ]]; then
-        if command -v get_env &> /dev/null; then
-            IBM_SSO_USERNAME="$(get_env ibm-sso-username "")"
-            [[ -z "${IBM_SSO_USERNAME}" ]] && IBM_SSO_USERNAME="$(get_env ibm_sso_username "")"
-        fi
+    # IBM_SSO_USERNAME
+    if [[ -z "${IBM_SSO_USERNAME:-}" ]] && command -v get_env &> /dev/null; then
+        IBM_SSO_USERNAME="$(get_env ibm_sso_username "")"
     fi
     if [[ -z "${IBM_SSO_USERNAME:-}" ]]; then
         log_error "IBM_SSO_USERNAME is not set."
-        log_error "  Add 'ibm-sso-username' secure property to your toolchain"
+        log_error "  In Toolchain Secure Properties add:  ibm_sso_username = your-email@ibm.com"
         return 1
     fi
     export IBM_SSO_USERNAME
 
-    # ------------------------------------------------------------------
-    # Resolve IBM_SSO_PASSWORD
-    # ------------------------------------------------------------------
-    if [[ -z "${IBM_SSO_PASSWORD:-}" ]]; then
-        if command -v get_env &> /dev/null; then
-            IBM_SSO_PASSWORD="$(get_env ibm-sso-password "")"
-            [[ -z "${IBM_SSO_PASSWORD}" ]] && IBM_SSO_PASSWORD="$(get_env ibm_sso_password "")"
-        fi
+    # IBM_SSO_PASSWORD — resolved without set -x to avoid leaking to logs
+    if [[ -z "${IBM_SSO_PASSWORD:-}" ]] && command -v get_env &> /dev/null; then
+        IBM_SSO_PASSWORD="$(get_env ibm_sso_password "")"
     fi
     if [[ -z "${IBM_SSO_PASSWORD:-}" ]]; then
         log_error "IBM_SSO_PASSWORD is not set."
-        log_error "  Add 'ibm-sso-password' secure property to your toolchain"
+        log_error "  In Toolchain Secure Properties add:  ibm_sso_password = <your-password>"
         return 1
     fi
     export IBM_SSO_PASSWORD
 
-    # Place reports inside the pipeline workspace so they are preserved
+    # Place reports inside the pipeline workspace so they survive the stage
     export ZAP_REPORT_DIR="${ZAP_REPORT_DIR:-${WORKSPACE_DIR}/zap-reports}"
     mkdir -p "${ZAP_REPORT_DIR}"
 

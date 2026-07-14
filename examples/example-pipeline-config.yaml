@@ -24,9 +24,9 @@ ica-security-scan:
     fi
     
     # Get credentials from secure properties
-    export ICA_APP_URL="$(get_env app-url)"
-    export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
-    export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+    export ICA_APP_URL="$(get_env app_url)"
+    export IBM_SSO_USERNAME="$(get_env ibm_sso_username)"
+    export IBM_SSO_PASSWORD="$(get_env ibm_sso_password)"
     
     # Optional: Configure scan parameters
     export ZAP_SCAN_TIMEOUT="60"           # Scan timeout in minutes
@@ -56,18 +56,18 @@ dynamic-scan:
     fi
     
     # Check if dynamic scan is enabled
-    if [ -z "$(get_env opt-in-dynamic-scan "")" ]; then
-      echo "Dynamic scan not enabled. Set 'opt-in-dynamic-scan' to enable."
+    if [ -z "$(get_env opt_in_dynamic_scan "")" ]; then
+      echo "Dynamic scan not enabled. Set 'opt_in_dynamic_scan' to enable."
       exit 0
     fi
     
     # Determine scan type
-    if [ "$(get_env use-ica-authenticated-scan "")" == "true" ]; then
+    if [ "$(get_env use_ica_authenticated_scan "")" == "true" ]; then
       echo "Running ICA authenticated scan..."
       
-      export ICA_APP_URL="$(get_env app-url)"
-      export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
-      export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+      export ICA_APP_URL="$(get_env app_url)"
+      export IBM_SSO_USERNAME="$(get_env ibm_sso_username)"
+      export IBM_SSO_PASSWORD="$(get_env ibm_sso_password)"
       export ZAP_SCAN_TIMEOUT="60"
       export ZAP_ALERT_THRESHOLD="MEDIUM"
       
@@ -99,16 +99,16 @@ staging-security-scan:
     #!/usr/bin/env bash
     
     # Only run in staging environment
-    if [[ "$(get_env target-environment)" != "staging" ]]; then
-      echo "Skipping security scan for $(get_env target-environment) environment"
+    if [[ "$(get_env target_environment)" != "staging" ]]; then
+      echo "Skipping security scan for $(get_env target_environment) environment"
       exit 0
     fi
     
     echo "Running security scan for staging environment..."
     
-    export ICA_APP_URL="$(get_env app-url)"
-    export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
-    export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+    export ICA_APP_URL="$(get_env app_url)"
+    export IBM_SSO_USERNAME="$(get_env ibm_sso_username)"
+    export IBM_SSO_PASSWORD="$(get_env ibm_sso_password)"
     
     # Staging-specific configuration
     export ZAP_SCAN_TIMEOUT="90"
@@ -126,16 +126,16 @@ production-security-scan:
     #!/usr/bin/env bash
     
     # Only run in production environment
-    if [[ "$(get_env target-environment)" != "production" ]]; then
-      echo "Skipping security scan for $(get_env target-environment) environment"
+    if [[ "$(get_env target_environment)" != "production" ]]; then
+      echo "Skipping security scan for $(get_env target_environment) environment"
       exit 0
     fi
     
     echo "Running security scan for production environment..."
     
-    export ICA_APP_URL="$(get_env app-url)"
-    export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
-    export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+    export ICA_APP_URL="$(get_env app_url)"
+    export IBM_SSO_USERNAME="$(get_env ibm_sso_username)"
+    export IBM_SSO_PASSWORD="$(get_env ibm_sso_password)"
     
     # Production-specific configuration (stricter)
     export ZAP_SCAN_TIMEOUT="120"
@@ -179,8 +179,8 @@ scheduled-security-scan:
         ;;
     esac
     
-    export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
-    export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+    export IBM_SSO_USERNAME="$(get_env ibm_sso_username)"
+    export IBM_SSO_PASSWORD="$(get_env ibm_sso_password)"
     export ZAP_SCAN_TIMEOUT="120"
     export ZAP_ALERT_THRESHOLD="MEDIUM"
     
@@ -208,8 +208,8 @@ multi-app-security-scan:
       "https://app3.ibm.com"
     )
     
-    export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
-    export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+    export IBM_SSO_USERNAME="$(get_env ibm_sso_username)"
+    export IBM_SSO_PASSWORD="$(get_env ibm_sso_password)"
     
     # Scan each application
     SCAN_FAILED=0
@@ -256,9 +256,9 @@ conditional-security-scan:
     if echo "${CHANGED_FILES}" | grep -qE "(server/|routes/|auth/|security/)"; then
       echo "Security-sensitive files changed, running scan..."
       
-      export ICA_APP_URL="$(get_env app-url)"
-      export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
-      export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+      export ICA_APP_URL="$(get_env app_url)"
+      export IBM_SSO_USERNAME="$(get_env ibm_sso_username)"
+      export IBM_SSO_PASSWORD="$(get_env ibm_sso_password)"
       export ZAP_SCAN_TIMEOUT="60"
       export ZAP_ALERT_THRESHOLD="MEDIUM"
       
@@ -272,14 +272,14 @@ conditional-security-scan:
 # =============================================================================
 # Add these to your IBM Cloud Toolchain Secure Properties:
 #
-# ibm-sso-username: your-email@ibm.com
-# ibm-sso-password: your-secure-password
-# app-url: https://your-ica-app.ibm.com
+# ibm_sso_username: your-email@ibm.com
+# ibm_sso_password: your-secure-password
+# app_url: https://your-ica-app.ibm.com
 #
 # Optional properties:
-# opt-in-dynamic-scan: true
-# use-ica-authenticated-scan: true
-# target-environment: staging|production
+# opt_in_dynamic_scan: true
+# use_ica_authenticated_scan: true
+# target_environment: staging|production
 
 # =============================================================================
 # Pipeline Triggers (Configure in Toolchain UI)

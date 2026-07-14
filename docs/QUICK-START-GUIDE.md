@@ -11,9 +11,9 @@ In your IBM Cloud Toolchain:
 1. Go to **Toolchain Settings** → **Secure Properties**
 2. Add these properties:
    ```
-   ibm-sso-username: your-email@ibm.com
-   ibm-sso-password: your-secure-password
-   app-url: https://your-ica-app.ibm.com
+   ibm_sso_username: your-email@ibm.com
+   ibm_sso_password: your-secure-password
+   app_url: https://your-ica-app.ibm.com
    ```
 
 ### Step 2: Update Pipeline Configuration (2 minutes)
@@ -28,9 +28,9 @@ ica-security-scan:
   script: |
     #!/usr/bin/env bash
     
-    export ICA_APP_URL="$(get_env app-url)"
-    export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
-    export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+    export ICA_APP_URL="$(get_env app_url)"
+    export IBM_SSO_USERNAME="$(get_env ibm_sso_username)"
+    export IBM_SSO_PASSWORD="$(get_env ibm_sso_password)"
     
     cd "$WORKSPACE/$(load_repo app-repo path)"
     source scripts/ci-cd/zap/run-ica-authenticated-scan.sh

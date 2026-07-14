@@ -111,17 +111,17 @@ Secure properties store sensitive credentials safely in your toolchain.
 
    | Property Name | Type | Value | Description |
    |--------------|------|-------|-------------|
-   | `ibm-sso-username` | Secure | `your-email@ibm.com` | Your IBM SSO username |
-   | `ibm-sso-password` | Secure | `your-password` | Your IBM SSO password |
-   | `app-url` | Text | `https://your-ica-app.ibm.com` | Target ICA application URL |
+   | `ibm_sso_username` | Secure | `your-email@ibm.com` | Your IBM SSO username |
+   | `ibm_sso_password` | Secure | `your-password` | Your IBM SSO password |
+   | `app_url` | Text | `https://your-ica-app.ibm.com` | Target ICA application URL |
 
 4. **Optional Properties**
 
    | Property Name | Type | Value | Description |
    |--------------|------|-------|-------------|
-   | `zap-scan-timeout` | Text | `60` | Scan timeout in minutes |
-   | `zap-alert-threshold` | Text | `MEDIUM` | Alert threshold (HIGH/MEDIUM/LOW) |
-   | `zap-max-depth` | Text | `5` | Maximum crawl depth |
+   | `zap_scan_timeout` | Text | `60` | Scan timeout in minutes |
+   | `zap_alert_threshold` | Text | `MEDIUM` | Alert threshold (HIGH/MEDIUM/LOW) |
+   | `zap_max_depth` | Text | `5` | Maximum crawl depth |
 
 5. **Save Properties**
    - Click **Save** after adding each property
@@ -182,14 +182,14 @@ dynamic-scan:
     fi
     
     # Set required environment variables from secure properties
-    export ICA_APP_URL="$(get_env app-url)"
-    export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
-    export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+    export ICA_APP_URL="$(get_env app_url)"
+    export IBM_SSO_USERNAME="$(get_env ibm_sso_username)"
+    export IBM_SSO_PASSWORD="$(get_env ibm_sso_password)"
     
     # Optional: Set scan configuration
-    export ZAP_SCAN_TIMEOUT="$(get_env zap-scan-timeout "60")"
-    export ZAP_ALERT_THRESHOLD="$(get_env zap-alert-threshold "MEDIUM")"
-    export ZAP_MAX_DEPTH="$(get_env zap-max-depth "5")"
+    export ZAP_SCAN_TIMEOUT="$(get_env zap_scan_timeout "60")"
+    export ZAP_ALERT_THRESHOLD="$(get_env zap_alert_threshold "MEDIUM")"
+    export ZAP_MAX_DEPTH="$(get_env zap_max_depth "5")"
     
     # Navigate to repository
     cd "$WORKSPACE/$(load_repo app-repo path)"
@@ -281,9 +281,9 @@ If not using `.pipeline-config.yaml`, configure stages manually:
 5. **Environment Properties:**
    - Click **Environment properties** tab
    - Add text properties:
-     - `APP_URL`: `${app-url}`
-     - `IBM_SSO_USERNAME`: `${ibm-sso-username}`
-     - `IBM_SSO_PASSWORD`: `${ibm-sso-password}`
+     - `APP_URL`: `${app_url}`
+     - `IBM_SSO_USERNAME`: `${ibm_sso_username}`
+     - `IBM_SSO_PASSWORD`: `${ibm_sso_password}`
 
 ---
 
@@ -404,7 +404,7 @@ dynamic-scan:
 2. Check property names match exactly (case-sensitive)
 3. Ensure you're using `get_env` function:
    ```bash
-   export ICA_APP_URL="$(get_env app-url)"
+   export ICA_APP_URL="$(get_env app_url)"
    ```
 
 ### Issue 3: "Authentication failed"

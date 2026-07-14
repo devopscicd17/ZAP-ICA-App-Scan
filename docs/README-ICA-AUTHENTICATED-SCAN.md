@@ -123,9 +123,9 @@ In your IBM Cloud Toolchain, add the following secure properties:
 
 ```bash
 # In Toolchain Settings > Secure Properties
-ibm-sso-username: your-email@ibm.com
-ibm-sso-password: your-secure-password
-app-url: https://your-ica-app.ibm.com
+ibm_sso_username: your-email@ibm.com
+ibm_sso_password: your-secure-password
+app_url: https://your-ica-app.ibm.com
 ```
 
 ### 3. Update .pipeline-config.yaml
@@ -146,9 +146,9 @@ dynamic-scan:
     fi
     
     # Set required environment variables
-    export ICA_APP_URL="$(get_env app-url)"
-    export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
-    export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+    export ICA_APP_URL="$(get_env app_url)"
+    export IBM_SSO_USERNAME="$(get_env ibm_sso_username)"
+    export IBM_SSO_PASSWORD="$(get_env ibm_sso_password)"
     
     # Optional: Configure scan parameters
     export ZAP_SCAN_TIMEOUT="60"
@@ -228,9 +228,9 @@ dynamic-scan:
   image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:3.61
   script: |
     #!/usr/bin/env bash
-    export ICA_APP_URL="$(get_env app-url)"
-    export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
-    export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+    export ICA_APP_URL="$(get_env app_url)"
+    export IBM_SSO_USERNAME="$(get_env ibm_sso_username)"
+    export IBM_SSO_PASSWORD="$(get_env ibm_sso_password)"
     
     cd "$WORKSPACE/$(load_repo app-repo path)"
     source scripts/ci-cd/zap/run-ica-authenticated-scan.sh
@@ -248,16 +248,16 @@ dynamic-scan:
   script: |
     #!/usr/bin/env bash
     
-    if [ -z "$(get_env opt-in-dynamic-scan "")" ]; then
+    if [ -z "$(get_env opt_in_dynamic_scan "")" ]; then
       echo "Dynamic scan not enabled"
       exit 0
     fi
     
     # Check if ICA authenticated scan is requested
-    if [ "$(get_env use-ica-authenticated-scan "")" == "true" ]; then
-      export ICA_APP_URL="$(get_env app-url)"
-      export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
-      export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+    if [ "$(get_env use_ica_authenticated_scan "")" == "true" ]; then
+      export ICA_APP_URL="$(get_env app_url)"
+      export IBM_SSO_USERNAME="$(get_env ibm_sso_username)"
+      export IBM_SSO_PASSWORD="$(get_env ibm_sso_password)"
       
       cd "$WORKSPACE/$(load_repo app-repo path)"
       source scripts/ci-cd/zap/run-ica-authenticated-scan.sh
@@ -283,15 +283,15 @@ ica-security-scan:
     #!/usr/bin/env bash
     
     # Only run in specific environments
-    if [[ "$(get_env target-environment)" != "staging" ]] && \
-       [[ "$(get_env target-environment)" != "production" ]]; then
-      echo "Skipping ICA authenticated scan for $(get_env target-environment)"
+    if [[ "$(get_env target_environment)" != "staging" ]] && \
+       [[ "$(get_env target_environment)" != "production" ]]; then
+      echo "Skipping ICA authenticated scan for $(get_env target_environment)"
       exit 0
     fi
     
-    export ICA_APP_URL="$(get_env app-url)"
-    export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
-    export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+    export ICA_APP_URL="$(get_env app_url)"
+    export IBM_SSO_USERNAME="$(get_env ibm_sso_username)"
+    export IBM_SSO_PASSWORD="$(get_env ibm_sso_password)"
     export ZAP_ALERT_THRESHOLD="HIGH"
     
     cd "$WORKSPACE/$(load_repo app-repo path)"
@@ -547,12 +547,12 @@ docker ps --filter "name=zap-scan-container"
 
 ```bash
 # Use secure properties in pipeline
-export IBM_SSO_USERNAME="$(get_env ibm-sso-username)"
-export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+export IBM_SSO_USERNAME="$(get_env ibm_sso_username)"
+export IBM_SSO_PASSWORD="$(get_env ibm_sso_password)"
 
 # Mask sensitive data in logs
 set +x  # Disable bash debug before handling credentials
-export IBM_SSO_PASSWORD="$(get_env ibm-sso-password)"
+export IBM_SSO_PASSWORD="$(get_env ibm_sso_password)"
 set -x  # Re-enable debug after
 ```
 

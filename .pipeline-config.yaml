@@ -266,17 +266,17 @@ owasp-zap:
 # ICA Authenticated Security Scan
 # Performs ZAP DAST with IBM w3id SAML2 SSO authentication for ICA-hosted apps.
 #
-# Required Toolchain Secure Properties:
-#   ibm-sso-username  — IBM w3id email  (e.g. user@ibm.com)
-#   ibm-sso-password  — IBM w3id password
-#   app-url           — Target ICA application URL
+# Required Toolchain Secure Properties (IBM Toolchain uses underscores only):
+#   ibm_sso_username  — IBM w3id email  (e.g. user@ibm.com)
+#   ibm_sso_password  — IBM w3id password
+#   app_url           — Target ICA application URL
 #
 # Optional Toolchain Properties:
-#   zap-scan-timeout       — Scan timeout in minutes      (default: 60)
-#   zap-alert-threshold    — HIGH | MEDIUM | LOW           (default: MEDIUM)
-#   zap-max-depth          — Spider crawl depth           (default: 5)
-#   zap-docker-image       — ZAP Docker image to use
-#   opt-in-ica-scan        — Set to any value to enable this stage
+#   zap_scan_timeout       — Scan timeout in minutes      (default: 60)
+#   zap_alert_threshold    — HIGH | MEDIUM | LOW           (default: MEDIUM)
+#   zap_max_depth          — Spider crawl depth           (default: 5)
+#   zap_docker_image       — ZAP Docker image to use
+#   opt_in_ica_scan        — Set to any value to enable this stage
 # =============================================================================
 ica-security-scan:
   dind: true
@@ -290,37 +290,46 @@ ica-security-scan:
       set -x
     fi
 
-    # Skip stage if not opted in
-    if [ -z "$(get_env opt-in-ica-scan "")" ]; then
+    # Skip stage if not opted in (IBM Toolchain property names use underscores)
+    if [ -z "$(get_env opt_in_ica_scan "")" ]; then
       echo "[INFO] ICA authenticated scan not enabled."
-      echo "[INFO] Add pipeline property 'opt-in-ica-scan' with any value to enable."
+      echo "[INFO] Add pipeline property 'opt_in_ica_scan' with any value to enable."
       exit 0
     fi
 
     # ---------------------------------------------------------------------------
     # Credentials — pulled from Toolchain Secure Properties
-    # Supports both dash (ibm-sso-username) and underscore (ibm_sso_username) keys
+    # NOTE: IBM Cloud Toolchain only supports underscores in property names.
     # ---------------------------------------------------------------------------
-    export ICA_APP_URL="${ICA_APP_URL:-$(get_env app-url "$(get_env app_url "")")}"
-    export IBM_SSO_USERNAME="${IBM_SSO_USERNAME:-$(get_env ibm-sso-username "$(get_env ibm_sso_username "")")}"
+    export ICA_APP_URL="$(get_env app_url "")"
+    export IBM_SSO_USERNAME="$(get_env ibm_sso_username "")"
 
-    # Retrieve password without enabling set -x to avoid logging it
+    # Retrieve password with set -x disabled to avoid logging it
     set +x
-    export IBM_SSO_PASSWORD="${IBM_SSO_PASSWORD:-$(get_env ibm-sso-password "$(get_env ibm_sso_password "")")}"
+    export IBM_SSO_PASSWORD="$(get_env ibm_sso_password "")"
     if [[ "$PIPELINE_DEBUG" == 1 ]]; then set -x; fi
 
+    # Validate required variables before going further
     if [[ -z "${ICA_APP_URL}" ]]; then
-      echo "[ERROR] app-url is not set in the pipeline. Add it as a Toolchain Secure Property." >&2
+      echo "[ERROR] app_url is not set. Add it as a Toolchain Secure Property named 'app_url'." >&2
+      exit 1
+    fi
+    if [[ -z "${IBM_SSO_USERNAME}" ]]; then
+      echo "[ERROR] ibm_sso_username is not set. Add it as a Toolchain Secure Property." >&2
+      exit 1
+    fi
+    if [[ -z "${IBM_SSO_PASSWORD}" ]]; then
+      echo "[ERROR] ibm_sso_password is not set. Add it as a Toolchain Secure Property." >&2
       exit 1
     fi
 
     # ---------------------------------------------------------------------------
-    # Optional scan tuning
+    # Optional scan tuning (all names use underscores)
     # ---------------------------------------------------------------------------
-    export ZAP_SCAN_TIMEOUT="${ZAP_SCAN_TIMEOUT:-$(get_env zap-scan-timeout "60")}"
-    export ZAP_ALERT_THRESHOLD="${ZAP_ALERT_THRESHOLD:-$(get_env zap-alert-threshold "MEDIUM")}"
-    export ZAP_MAX_DEPTH="${ZAP_MAX_DEPTH:-$(get_env zap-max-depth "5")}"
-    export ZAP_DOCKER_IMAGE="${ZAP_DOCKER_IMAGE:-$(get_env zap-docker-image "ghcr.io/zaproxy/zaproxy:stable")}"
+    export ZAP_SCAN_TIMEOUT="$(get_env zap_scan_timeout "60")"
+    export ZAP_ALERT_THRESHOLD="$(get_env zap_alert_threshold "MEDIUM")"
+    export ZAP_MAX_DEPTH="$(get_env zap_max_depth "5")"
+    export ZAP_DOCKER_IMAGE="$(get_env zap_docker_image "ghcr.io/zaproxy/zaproxy:stable")"
 
     # ---------------------------------------------------------------------------
     # Run the authenticated scan
