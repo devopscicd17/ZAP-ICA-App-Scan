@@ -261,3 +261,69 @@ owasp-zap:
     # run OWASP-ZAP scans
     # see https://us-south.git.cloud.ibm.com/open-toolchain/compliance-commons/-/blob/master/doc/dynamic-scan__start-zap-scans.md
     source "${COMMONS_PATH}/dynamic-scan/start-zap-scans.sh"
+
+# =============================================================================
+# ICA Authenticated Security Scan
+# Performs ZAP DAST with IBM w3id SAML2 SSO authentication for ICA-hosted apps.
+#
+# Required Toolchain Secure Properties:
+#   ibm-sso-username  — IBM w3id email  (e.g. user@ibm.com)
+#   ibm-sso-password  — IBM w3id password
+#   app-url           — Target ICA application URL
+#
+# Optional Toolchain Properties:
+#   zap-scan-timeout       — Scan timeout in minutes      (default: 60)
+#   zap-alert-threshold    — HIGH | MEDIUM | LOW           (default: MEDIUM)
+#   zap-max-depth          — Spider crawl depth           (default: 5)
+#   zap-docker-image       — ZAP Docker image to use
+#   opt-in-ica-scan        — Set to any value to enable this stage
+# =============================================================================
+ica-security-scan:
+  dind: true
+  abort_on_failure: false
+  image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:3.61
+  script: |
+    #!/usr/bin/env bash
+
+    if [[ "$PIPELINE_DEBUG" == 1 ]]; then
+      env
+      set -x
+    fi
+
+    # Skip stage if not opted in
+    if [ -z "$(get_env opt-in-ica-scan "")" ]; then
+      echo "[INFO] ICA authenticated scan not enabled."
+      echo "[INFO] Add pipeline property 'opt-in-ica-scan' with any value to enable."
+      exit 0
+    fi
+
+    # ---------------------------------------------------------------------------
+    # Credentials — pulled from Toolchain Secure Properties
+    # Supports both dash (ibm-sso-username) and underscore (ibm_sso_username) keys
+    # ---------------------------------------------------------------------------
+    export ICA_APP_URL="${ICA_APP_URL:-$(get_env app-url "$(get_env app_url "")")}"
+    export IBM_SSO_USERNAME="${IBM_SSO_USERNAME:-$(get_env ibm-sso-username "$(get_env ibm_sso_username "")")}"
+
+    # Retrieve password without enabling set -x to avoid logging it
+    set +x
+    export IBM_SSO_PASSWORD="${IBM_SSO_PASSWORD:-$(get_env ibm-sso-password "$(get_env ibm_sso_password "")")}"
+    if [[ "$PIPELINE_DEBUG" == 1 ]]; then set -x; fi
+
+    if [[ -z "${ICA_APP_URL}" ]]; then
+      echo "[ERROR] app-url is not set in the pipeline. Add it as a Toolchain Secure Property." >&2
+      exit 1
+    fi
+
+    # ---------------------------------------------------------------------------
+    # Optional scan tuning
+    # ---------------------------------------------------------------------------
+    export ZAP_SCAN_TIMEOUT="${ZAP_SCAN_TIMEOUT:-$(get_env zap-scan-timeout "60")}"
+    export ZAP_ALERT_THRESHOLD="${ZAP_ALERT_THRESHOLD:-$(get_env zap-alert-threshold "MEDIUM")}"
+    export ZAP_MAX_DEPTH="${ZAP_MAX_DEPTH:-$(get_env zap-max-depth "5")}"
+    export ZAP_DOCKER_IMAGE="${ZAP_DOCKER_IMAGE:-$(get_env zap-docker-image "ghcr.io/zaproxy/zaproxy:stable")}"
+
+    # ---------------------------------------------------------------------------
+    # Run the authenticated scan
+    # ---------------------------------------------------------------------------
+    cd "$WORKSPACE/$(load_repo app-repo path)"
+    source scripts/run-ica-authenticated-scan.sh

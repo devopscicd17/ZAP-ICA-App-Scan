@@ -1,239 +1,244 @@
 /**
  * ZAP Authentication Script for IBM SSO (IBM Consulting Advantage)
- * This script handles IBM SSO authentication for ICA applications
- * 
- * Script Type: Authentication
- * Script Engine: Oracle Nashorn
- * 
- * Required Parameters:
- * - IBM_SSO_USERNAME: IBM SSO username/email
- * - IBM_SSO_PASSWORD: IBM SSO password
- * - ICA_APP_URL: Target ICA application URL
- * - IBM_SSO_LOGIN_URL: IBM SSO login endpoint (default: https://w3id.sso.ibm.com/auth/sps/samlidp2/saml20)
+ *
+ * Script Type  : Authentication
+ * Script Engine: Oracle Nashorn (Java 8 / ZAP 2.x) or GraalVM JS (ZAP 2.14+)
+ *
+ * Required ZAP Parameters (set via "Script parameters" in ZAP context):
+ *   ICA_APP_URL       — Target ICA application URL
+ *   IBM_SSO_LOGIN_URL — IBM SSO IdP endpoint (optional, falls back to env/default)
+ *
+ * Required User Credentials (set via "Users" in ZAP context):
+ *   username          — IBM w3id email address
+ *   password          — IBM w3id password
+ *
+ * The script follows the IBM w3id SAML2 POST-binding flow:
+ *   1. GET protected resource → IdP redirect with SAMLRequest
+ *   2. POST credentials to IdP → SAMLResponse
+ *   3. POST SAMLResponse to SP ACS → session cookie
+ *   4. GET protected resource again → verify session is active
  */
 
-// Import required Java classes for HTTP operations
+// ---------------------------------------------------------------------------
+// Java type imports — compatible with both Nashorn and GraalVM JS
+// ---------------------------------------------------------------------------
 var HttpRequestHeader = Java.type('org.parosproxy.paros.network.HttpRequestHeader');
-var HttpMessage = Java.type('org.parosproxy.paros.network.HttpMessage');
-var URI = Java.type('org.apache.commons.httpclient.URI');
-var HttpMethodType = Java.type('org.zaproxy.zap.network.HttpRequestBody');
+var HttpMessage       = Java.type('org.parosproxy.paros.network.HttpMessage');
+var URI               = Java.type('org.apache.commons.httpclient.URI');
+
+// ---------------------------------------------------------------------------
+// Public API required by ZAP's Script-based Authentication
+// ---------------------------------------------------------------------------
 
 /**
- * Main authentication function called by ZAP
- * @param helper - ZAP authentication helper object
- * @param paramsValues - Map of parameter values
- * @param credentials - User credentials object
- * @returns Authentication result object
+ * Called by ZAP to perform authentication.
+ *
+ * @param {object} helper        — ZAP HttpSender helper
+ * @param {Map}    paramsValues  — Script parameters from ZAP context
+ * @param {object} credentials   — Credentials object for the current user
+ * @returns {HttpMessage}        — The last HTTP message (ZAP inspects cookies)
  */
 function authenticate(helper, paramsValues, credentials) {
-    print("Starting IBM SSO authentication for ICA application...");
-    
-    // Get configuration from environment or parameters
-    var username = credentials.getParam("username") || java.lang.System.getenv("IBM_SSO_USERNAME");
-    var password = credentials.getParam("password") || java.lang.System.getenv("IBM_SSO_PASSWORD");
-    var appUrl = paramsValues.get("ICA_APP_URL") || java.lang.System.getenv("ICA_APP_URL");
-    var ssoLoginUrl = paramsValues.get("IBM_SSO_LOGIN_URL") || java.lang.System.getenv("IBM_SSO_LOGIN_URL") || "https://w3id.sso.ibm.com/auth/sps/samlidp2/saml20";
-    
-    if (!username || !password || !appUrl) {
-        print("ERROR: Missing required authentication parameters");
-        print("Required: IBM_SSO_USERNAME, IBM_SSO_PASSWORD, ICA_APP_URL");
-        return newAuthenticationResult(false, "Missing required authentication parameters");
+    _log("=== IBM SSO Authentication START ===");
+
+    var username    = credentials.getParam("username");
+    var password    = credentials.getParam("password");
+    var appUrl      = _param(paramsValues, "ICA_APP_URL");
+    var ssoLoginUrl = _param(paramsValues, "IBM_SSO_LOGIN_URL")
+                      || java.lang.System.getenv("IBM_SSO_LOGIN_URL")
+                      || "https://w3id.sso.ibm.com/auth/sps/samlidp2/saml20";
+
+    if (!username || !password) {
+        _log("ERROR: credentials.username or credentials.password is empty");
+        return null;
     }
-    
-    print("Authenticating user: " + username);
-    print("Target application: " + appUrl);
-    
+    if (!appUrl) {
+        _log("ERROR: ICA_APP_URL is not set in script parameters or environment");
+        return null;
+    }
+
+    _log("User    : " + username);
+    _log("App URL : " + appUrl);
+    _log("SSO URL : " + ssoLoginUrl);
+
     try {
-        // Step 1: Initiate SSO flow by accessing the protected application
-        print("Step 1: Initiating SSO flow...");
-        var initiateMsg = helper.prepareMessage();
-        initiateMsg.getRequestHeader().setURI(new URI(appUrl, true));
-        initiateMsg.getRequestHeader().setMethod("GET");
-        helper.sendAndReceive(initiateMsg);
-        
-        var initiateResponse = initiateMsg.getResponseBody().toString();
-        print("Initial response status: " + initiateMsg.getResponseHeader().getStatusCode());
-        
-        // Step 2: Extract SAML request and relay state from redirect
-        var samlRequest = extractParameter(initiateResponse, "SAMLRequest");
-        var relayState = extractParameter(initiateResponse, "RelayState");
-        
+        // ------------------------------------------------------------------
+        // Step 1 — Access protected resource to trigger SP-initiated SSO
+        // ------------------------------------------------------------------
+        _log("Step 1: Accessing protected resource to get SAMLRequest...");
+        var initMsg = _get(helper, appUrl);
+        var initBody = initMsg.getResponseBody().toString();
+        _log("Initial HTTP status: " + initMsg.getResponseHeader().getStatusCode());
+
+        var samlRequest = _extractHiddenField(initBody, "SAMLRequest");
+        var relayState  = _extractHiddenField(initBody, "RelayState");
+        var idpAction   = _extractFormAction(initBody) || ssoLoginUrl;
+
         if (!samlRequest) {
-            print("WARNING: No SAML request found, attempting direct login...");
+            _log("WARNING: SAMLRequest not found in initial response — app may not require SSO");
         }
-        
-        // Step 3: Submit credentials to IBM SSO
-        print("Step 2: Submitting credentials to IBM SSO...");
-        var loginMsg = helper.prepareMessage();
-        loginMsg.getRequestHeader().setURI(new URI(ssoLoginUrl, true));
-        loginMsg.getRequestHeader().setMethod("POST");
-        loginMsg.getRequestHeader().setHeader("Content-Type", "application/x-www-form-urlencoded");
-        
-        // Build login form data
-        var loginData = "username=" + encodeURIComponent(username) + 
-                       "&password=" + encodeURIComponent(password);
-        
-        if (samlRequest) {
-            loginData += "&SAMLRequest=" + encodeURIComponent(samlRequest);
-        }
-        if (relayState) {
-            loginData += "&RelayState=" + encodeURIComponent(relayState);
-        }
-        
-        loginMsg.setRequestBody(loginData);
-        loginMsg.getRequestHeader().setContentLength(loginMsg.getRequestBody().length());
-        
-        helper.sendAndReceive(loginMsg);
-        
+
+        // ------------------------------------------------------------------
+        // Step 2 — POST credentials to IBM SSO IdP
+        // ------------------------------------------------------------------
+        _log("Step 2: Posting credentials to IBM SSO IdP...");
+        var loginBody = "username=" + _encode(username)
+                      + "&password=" + _encode(password);
+        if (samlRequest) loginBody += "&SAMLRequest=" + _encode(samlRequest);
+        if (relayState)  loginBody += "&RelayState="  + _encode(relayState);
+
+        var loginMsg = _post(helper, idpAction, loginBody);
         var loginStatus = loginMsg.getResponseHeader().getStatusCode();
-        print("Login response status: " + loginStatus);
-        
-        // Step 4: Handle SAML response and complete authentication
-        if (loginStatus == 200 || loginStatus == 302) {
-            var loginResponse = loginMsg.getResponseBody().toString();
-            var samlResponse = extractParameter(loginResponse, "SAMLResponse");
-            
-            if (samlResponse) {
-                print("Step 3: Processing SAML response...");
-                
-                // Extract ACS URL (Assertion Consumer Service)
-                var acsUrl = extractFormAction(loginResponse) || appUrl + "/saml/acs";
-                
-                var samlMsg = helper.prepareMessage();
-                samlMsg.getRequestHeader().setURI(new URI(acsUrl, true));
-                samlMsg.getRequestHeader().setMethod("POST");
-                samlMsg.getRequestHeader().setHeader("Content-Type", "application/x-www-form-urlencoded");
-                
-                var samlData = "SAMLResponse=" + encodeURIComponent(samlResponse);
-                if (relayState) {
-                    samlData += "&RelayState=" + encodeURIComponent(relayState);
-                }
-                
-                samlMsg.setRequestBody(samlData);
-                samlMsg.getRequestHeader().setContentLength(samlMsg.getRequestBody().length());
-                
-                helper.sendAndReceive(samlMsg);
-                
-                var samlStatus = samlMsg.getResponseHeader().getStatusCode();
-                print("SAML response status: " + samlStatus);
-                
-                // Step 5: Verify authentication by checking session
-                print("Step 4: Verifying authentication...");
-                var verifyMsg = helper.prepareMessage();
-                verifyMsg.getRequestHeader().setURI(new URI(appUrl, true));
-                verifyMsg.getRequestHeader().setMethod("GET");
-                helper.sendAndReceive(verifyMsg);
-                
-                var verifyResponse = verifyMsg.getResponseBody().toString();
-                var verifyStatus = verifyMsg.getResponseHeader().getStatusCode();
-                
-                // Check for successful authentication indicators
-                var isAuthenticated = verifyStatus == 200 && 
-                                    !verifyResponse.contains("login") && 
-                                    !verifyResponse.contains("Sign in") &&
-                                    !verifyResponse.contains("w3id.sso.ibm.com");
-                
-                if (isAuthenticated) {
-                    print("SUCCESS: Authentication completed successfully");
-                    print("Session cookies established");
-                    return newAuthenticationResult(true, "Authentication successful");
-                } else {
-                    print("ERROR: Authentication verification failed");
-                    return newAuthenticationResult(false, "Authentication verification failed");
-                }
-            } else {
-                print("ERROR: No SAML response received from IBM SSO");
-                return newAuthenticationResult(false, "No SAML response received");
+        _log("IdP response status: " + loginStatus);
+
+        var loginRespBody = loginMsg.getResponseBody().toString();
+
+        // Handle HTTP 302 redirect from IdP — follow to get SAMLResponse page
+        if (loginStatus === 302) {
+            var location = loginMsg.getResponseHeader().getHeader("Location");
+            if (location) {
+                _log("Following IdP redirect to: " + location);
+                loginMsg      = _get(helper, location);
+                loginRespBody = loginMsg.getResponseBody().toString();
             }
-        } else {
-            print("ERROR: Login failed with status: " + loginStatus);
-            return newAuthenticationResult(false, "Login failed with status: " + loginStatus);
         }
-        
+
+        var samlResponse   = _extractHiddenField(loginRespBody, "SAMLResponse");
+        var relayState2    = _extractHiddenField(loginRespBody, "RelayState");
+        var acsUrl         = _extractFormAction(loginRespBody) || (appUrl + "/saml/acs");
+
+        if (!samlResponse) {
+            _log("ERROR: No SAMLResponse found in IdP response — check credentials or SSO URL");
+            return loginMsg;
+        }
+
+        // ------------------------------------------------------------------
+        // Step 3 — POST SAMLResponse to Service Provider ACS
+        // ------------------------------------------------------------------
+        _log("Step 3: Posting SAMLResponse to SP ACS: " + acsUrl);
+        var acsBody = "SAMLResponse=" + _encode(samlResponse);
+        if (relayState2) acsBody += "&RelayState=" + _encode(relayState2);
+
+        var acsMsg = _post(helper, acsUrl, acsBody);
+        _log("ACS response status: " + acsMsg.getResponseHeader().getStatusCode());
+
+        // ------------------------------------------------------------------
+        // Step 4 — Verify session by fetching the protected resource again
+        // ------------------------------------------------------------------
+        _log("Step 4: Verifying session...");
+        var verifyMsg  = _get(helper, appUrl);
+        var verifyBody = verifyMsg.getResponseBody().toString();
+        var verifyStat = verifyMsg.getResponseHeader().getStatusCode();
+
+        _log("Verification HTTP status: " + verifyStat);
+
+        var stillOnLoginPage = verifyBody.toLowerCase().indexOf("w3id.sso.ibm.com") >= 0
+                            || verifyBody.toLowerCase().indexOf("sign in") >= 0
+                            || verifyBody.toLowerCase().indexOf("samlrequest") >= 0;
+
+        if (verifyStat === 200 && !stillOnLoginPage) {
+            _log("=== Authentication SUCCESSFUL ===");
+        } else {
+            _log("WARNING: Post-authentication check suggests login may have failed");
+        }
+
+        // ZAP uses the returned message's cookies for subsequent requests
+        return verifyMsg;
+
     } catch (e) {
-        print("ERROR: Authentication exception: " + e.message);
-        e.printStackTrace();
-        return newAuthenticationResult(false, "Authentication exception: " + e.message);
+        _log("EXCEPTION during authentication: " + e);
+        if (e.javaException) e.javaException.printStackTrace();
+        return null;
     }
 }
 
 /**
- * Extract parameter value from HTML/response
- */
-function extractParameter(html, paramName) {
-    var pattern = new RegExp('name="' + paramName + '"\\s+value="([^"]+)"', 'i');
-    var match = pattern.exec(html);
-    if (match && match.length > 1) {
-        return match[1];
-    }
-    
-    // Try alternative pattern
-    pattern = new RegExp(paramName + '=([^&\\s"]+)', 'i');
-    match = pattern.exec(html);
-    if (match && match.length > 1) {
-        return match[1];
-    }
-    
-    return null;
-}
-
-/**
- * Extract form action URL from HTML
- */
-function extractFormAction(html) {
-    var pattern = /<form[^>]+action="([^"]+)"/i;
-    var match = pattern.exec(html);
-    if (match && match.length > 1) {
-        return match[1];
-    }
-    return null;
-}
-
-/**
- * URL encode a string
- */
-function encodeURIComponent(str) {
-    return java.net.URLEncoder.encode(str, "UTF-8");
-}
-
-/**
- * Create authentication result object
- */
-function newAuthenticationResult(success, message) {
-    var AuthenticationResult = Java.type('org.zaproxy.zap.authentication.AuthenticationResult');
-    if (success) {
-        return AuthenticationResult.newSuccessfulResult(message);
-    } else {
-        return AuthenticationResult.newFailedResult(message);
-    }
-}
-
-/**
- * Get required parameter names for ZAP UI
+ * Required parameter names shown in ZAP context GUI.
  */
 function getRequiredParamsNames() {
     return ["ICA_APP_URL"];
 }
 
 /**
- * Get optional parameter names for ZAP UI
+ * Optional parameter names shown in ZAP context GUI.
  */
 function getOptionalParamsNames() {
     return ["IBM_SSO_LOGIN_URL"];
 }
 
 /**
- * Get credentials parameter names for ZAP UI
+ * Credential field names shown in ZAP Users GUI.
  */
 function getCredentialsParamsNames() {
     return ["username", "password"];
 }
 
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+function _get(helper, url) {
+    var msg = helper.prepareMessage();
+    msg.getRequestHeader().setMethod(HttpRequestHeader.GET);
+    msg.getRequestHeader().setURI(new URI(url, true));
+    msg.getRequestHeader().setVersion(HttpRequestHeader.HTTP11);
+    msg.setRequestBody("");
+    msg.getRequestHeader().setContentLength(0);
+    helper.sendAndReceive(msg, false);
+    return msg;
+}
+
+function _post(helper, url, bodyStr) {
+    var msg = helper.prepareMessage();
+    msg.getRequestHeader().setMethod(HttpRequestHeader.POST);
+    msg.getRequestHeader().setURI(new URI(url, true));
+    msg.getRequestHeader().setVersion(HttpRequestHeader.HTTP11);
+    msg.getRequestHeader().setHeader("Content-Type", "application/x-www-form-urlencoded");
+    msg.setRequestBody(bodyStr);
+    msg.getRequestHeader().setContentLength(msg.getRequestBody().length());
+    helper.sendAndReceive(msg, false);
+    return msg;
+}
+
+/** Safely read a script parameter (paramsValues is a Java Map). */
+function _param(paramsValues, key) {
+    try { return paramsValues.get(key) || null; } catch (e) { return null; }
+}
+
 /**
- * Logging helper
+ * Extract an HTML hidden-field value, e.g.:
+ *   <input type="hidden" name="SAMLRequest" value="PHNhbWxwOi..." />
+ * Both single- and double-quoted values are handled.
  */
-function print(message) {
-    java.lang.System.out.println("[IBM-SSO-Auth] " + message);
+function _extractHiddenField(html, name) {
+    // Try name="..." value="..." ordering
+    var re1 = new RegExp(
+        'name=["\']' + name + '["\'][^>]*?value=["\']([^"\']+)["\']', 'i');
+    var m = re1.exec(html);
+    if (m) return m[1];
+
+    // Try value="..." name="..." ordering
+    var re2 = new RegExp(
+        'value=["\']([^"\']+)["\'][^>]*?name=["\']' + name + '["\']', 'i');
+    m = re2.exec(html);
+    if (m) return m[1];
+
+    return null;
+}
+
+/** Extract the action URL from the first <form> tag. */
+function _extractFormAction(html) {
+    var m = /<form[^>]+action=["']([^"']+)["']/i.exec(html);
+    return m ? m[1] : null;
+}
+
+/** URL-encode a string using Java. */
+function _encode(str) {
+    return java.net.URLEncoder.encode(String(str), "UTF-8");
+}
+
+function _log(msg) {
+    java.lang.System.out.println("[IBM-SSO-Auth] " + msg);
 }
 
 // Made with Bob

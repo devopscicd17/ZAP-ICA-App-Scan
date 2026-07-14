@@ -1,82 +1,75 @@
 #!/usr/bin/env bash
 #
 # ZAP Full Scan with IBM SSO Authentication for ICA Applications
-# This script performs an authenticated OWASP ZAP full scan against ICA apps
-# hosted in IBM Consulting Advantage using IBM SSO authentication
+# Performs an authenticated OWASP ZAP full scan (spider + active) against ICA
+# apps hosted in IBM Consulting Advantage using IBM w3id SAML SSO.
 #
-# Required Environment Variables:
-# - ICA_APP_URL: Target ICA application URL
-# - IBM_SSO_USERNAME: IBM SSO username/email
-# - IBM_SSO_PASSWORD: IBM SSO password
-# - ZAP_API_KEY: ZAP API key (optional, generated if not provided)
+# Required environment variables:
+#   ICA_APP_URL        — Target ICA application URL
+#   IBM_SSO_USERNAME   — IBM w3id email address
+#   IBM_SSO_PASSWORD   — IBM w3id password
 #
-# Optional Environment Variables:
-# - IBM_SSO_LOGIN_URL: IBM SSO login endpoint (default: https://w3id.sso.ibm.com/auth/sps/samlidp2/saml20)
-# - ZAP_SCAN_TIMEOUT: Scan timeout in minutes (default: 60)
-# - ZAP_REPORT_DIR: Directory for scan reports (default: ./zap-reports)
-# - ZAP_CONTEXT_NAME: ZAP context name (default: ICA-App-Context)
-# - ZAP_MAX_DEPTH: Maximum crawl depth (default: 5)
-# - ZAP_THREAD_COUNT: Number of threads for scanning (default: 5)
-# - ZAP_ALERT_THRESHOLD: Alert threshold (default: MEDIUM)
-# - ZAP_EXCLUDE_URLS: Comma-separated list of URLs to exclude from scan
+# Optional environment variables (defaults shown):
+#   IBM_SSO_LOGIN_URL  — https://w3id.sso.ibm.com/auth/sps/samlidp2/saml20
+#   ZAP_SCAN_TIMEOUT   — 60  (minutes)
+#   ZAP_REPORT_DIR     — ./zap-reports
+#   ZAP_CONTEXT_NAME   — ICA-App-Context
+#   ZAP_MAX_DEPTH      — 5
+#   ZAP_THREAD_COUNT   — 5
+#   ZAP_ALERT_THRESHOLD — MEDIUM  (HIGH | MEDIUM | LOW | INFORMATIONAL)
+#   ZAP_EXCLUDE_URLS   — .*logout.*,.*signout.*,.*sign-out.*
+#   ZAP_DOCKER_IMAGE   — ghcr.io/zaproxy/zaproxy:stable
+#   ZAP_CONTAINER_NAME — zap-scan-container
+#   ZAP_API_KEY        — auto-generated UUID if not set
+#   ZAP_LOG_LEVEL      — INFO
+#
+# Exit codes:
+#   0 — scan completed, no alerts above threshold
+#   1 — scan completed, alerts found above threshold OR scan error
 
 set -euo pipefail
 
-# Color codes for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+# =============================================================================
+# Colour helpers (disabled automatically when not a TTY)
+# =============================================================================
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+else
+    RED=''; GREEN=''; YELLOW=''; BLUE=''; NC=''
+fi
 
-# Logging functions
-log_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
+log_info()    { echo -e "${BLUE}[INFO]${NC}    $*"; }
+log_success() { echo -e "${GREEN}[SUCCESS]${NC} $*"; }
+log_warning() { echo -e "${YELLOW}[WARNING]${NC} $*"; }
+log_error()   { echo -e "${RED}[ERROR]${NC}   $*" >&2; }
 
-log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
+# =============================================================================
 # Validate required environment variables
+# =============================================================================
 validate_environment() {
     log_info "Validating environment variables..."
-    
-    local missing_vars=()
-    
-    if [[ -z "${ICA_APP_URL:-}" ]]; then
-        missing_vars+=("ICA_APP_URL")
-    fi
-    
-    if [[ -z "${IBM_SSO_USERNAME:-}" ]]; then
-        missing_vars+=("IBM_SSO_USERNAME")
-    fi
-    
-    if [[ -z "${IBM_SSO_PASSWORD:-}" ]]; then
-        missing_vars+=("IBM_SSO_PASSWORD")
-    fi
-    
-    if [[ ${#missing_vars[@]} -gt 0 ]]; then
-        log_error "Missing required environment variables: ${missing_vars[*]}"
-        log_error "Please set the following variables:"
+
+    local missing=()
+    [[ -z "${ICA_APP_URL:-}"      ]] && missing+=("ICA_APP_URL")
+    [[ -z "${IBM_SSO_USERNAME:-}" ]] && missing+=("IBM_SSO_USERNAME")
+    [[ -z "${IBM_SSO_PASSWORD:-}" ]] && missing+=("IBM_SSO_PASSWORD")
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log_error "Missing required environment variables:"
+        printf '  %s\n' "${missing[@]}" >&2
+        log_error "Example:"
         log_error "  export ICA_APP_URL='https://your-ica-app.ibm.com'"
-        log_error "  export IBM_SSO_USERNAME='your-email@ibm.com'"
-        log_error "  export IBM_SSO_PASSWORD='your-password'"
+        log_error "  export IBM_SSO_USERNAME='user@ibm.com'"
+        log_error "  export IBM_SSO_PASSWORD='secret'"
         exit 1
     fi
-    
+
     log_success "Environment validation passed"
 }
 
+# =============================================================================
 # Set default values
+# =============================================================================
 set_defaults() {
     export IBM_SSO_LOGIN_URL="${IBM_SSO_LOGIN_URL:-https://w3id.sso.ibm.com/auth/sps/samlidp2/saml20}"
     export ZAP_SCAN_TIMEOUT="${ZAP_SCAN_TIMEOUT:-60}"
@@ -85,54 +78,64 @@ set_defaults() {
     export ZAP_MAX_DEPTH="${ZAP_MAX_DEPTH:-5}"
     export ZAP_THREAD_COUNT="${ZAP_THREAD_COUNT:-5}"
     export ZAP_ALERT_THRESHOLD="${ZAP_ALERT_THRESHOLD:-MEDIUM}"
-    export ZAP_API_KEY="${ZAP_API_KEY:-$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "zap-api-key-$(date +%s)")}"
-    export ZAP_DOCKER_IMAGE="${ZAP_DOCKER_IMAGE:-owasp/zap2docker-stable}"
+    export ZAP_EXCLUDE_URLS="${ZAP_EXCLUDE_URLS:-.*logout.*,.*signout.*,.*sign-out.*}"
+    # Prefer the newer ghcr.io image; fall back to DockerHub for older pipelines
+    export ZAP_DOCKER_IMAGE="${ZAP_DOCKER_IMAGE:-ghcr.io/zaproxy/zaproxy:stable}"
     export ZAP_CONTAINER_NAME="${ZAP_CONTAINER_NAME:-zap-scan-container}"
-    
-    # Create report directory with absolute path
+    export ZAP_LOG_LEVEL="${ZAP_LOG_LEVEL:-INFO}"
+
+    # Generate a stable API key for this run
+    if [[ -z "${ZAP_API_KEY:-}" ]]; then
+        ZAP_API_KEY="$(cat /proc/sys/kernel/random/uuid 2>/dev/null \
+                       || uuidgen 2>/dev/null \
+                       || echo "zap-key-$(date +%s)")"
+        export ZAP_API_KEY
+    fi
+
+    # Resolve absolute path for the report directory now
     mkdir -p "${ZAP_REPORT_DIR}"
-    export ZAP_REPORT_DIR_ABS="$(cd "${ZAP_REPORT_DIR}" && pwd)"
-    
+    ZAP_REPORT_DIR_ABS="$(cd "${ZAP_REPORT_DIR}" && pwd)"
+    export ZAP_REPORT_DIR_ABS
+
+    # Single timestamp shared across all generated report files in this run
+    SCAN_TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+    export SCAN_TIMESTAMP
+
     log_info "Configuration:"
-    log_info "  Target URL: ${ICA_APP_URL}"
-    log_info "  SSO Login URL: ${IBM_SSO_LOGIN_URL}"
-    log_info "  Context Name: ${ZAP_CONTEXT_NAME}"
-    log_info "  Max Depth: ${ZAP_MAX_DEPTH}"
-    log_info "  Thread Count: ${ZAP_THREAD_COUNT}"
-    log_info "  Alert Threshold: ${ZAP_ALERT_THRESHOLD}"
-    log_info "  Report Directory: ${ZAP_REPORT_DIR_ABS}"
-    log_info "  Scan Timeout: ${ZAP_SCAN_TIMEOUT} minutes"
-    log_info "  ZAP Docker Image: ${ZAP_DOCKER_IMAGE}"
+    log_info "  Target URL       : ${ICA_APP_URL}"
+    log_info "  SSO Login URL    : ${IBM_SSO_LOGIN_URL}"
+    log_info "  Context Name     : ${ZAP_CONTEXT_NAME}"
+    log_info "  Max Depth        : ${ZAP_MAX_DEPTH}"
+    log_info "  Thread Count     : ${ZAP_THREAD_COUNT}"
+    log_info "  Alert Threshold  : ${ZAP_ALERT_THRESHOLD}"
+    log_info "  Scan Timeout     : ${ZAP_SCAN_TIMEOUT} minutes"
+    log_info "  ZAP Docker Image : ${ZAP_DOCKER_IMAGE}"
+    log_info "  Report Directory : ${ZAP_REPORT_DIR_ABS}"
+    log_info "  Run Timestamp    : ${SCAN_TIMESTAMP}"
 }
 
-# Start ZAP daemon using Docker
+# =============================================================================
+# Start ZAP daemon in Docker
+# =============================================================================
 start_zap_daemon() {
-    log_info "Starting ZAP daemon using Docker..."
-    
-    # Check if Docker is available
+    log_info "Starting ZAP daemon in Docker..."
+
     if ! command -v docker &> /dev/null; then
-        log_error "Docker is not installed or not in PATH"
-        log_error "Please ensure Docker is available in the IBM Cloud Toolchain environment"
+        log_error "Docker is not in PATH. Ensure the pipeline stage has 'dind: true'."
         exit 1
     fi
-    
-    log_info "Docker found: $(docker --version)"
-    
-    # Stop and remove any existing ZAP container
+    log_info "Docker: $(docker --version)"
+
+    # Remove any stale container with the same name
     if docker ps -a --format '{{.Names}}' | grep -q "^${ZAP_CONTAINER_NAME}$"; then
-        log_info "Removing existing ZAP container..."
+        log_info "Removing stale ZAP container..."
         docker rm -f "${ZAP_CONTAINER_NAME}" > /dev/null 2>&1 || true
     fi
-    
-    # Get the script directory for mounting
-    local script_dir="$(cd "$(dirname "$0")" && pwd)"
-    
-    # Start ZAP container in daemon mode
-    log_info "Starting ZAP Docker container..."
-    log_info "  Image: ${ZAP_DOCKER_IMAGE}"
-    log_info "  Container: ${ZAP_CONTAINER_NAME}"
-    log_info "  Port: 8080"
-    
+
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    log_info "Starting ZAP container (${ZAP_CONTAINER_NAME}) on port 8080..."
     docker run -d \
         --name "${ZAP_CONTAINER_NAME}" \
         -u zap \
@@ -140,367 +143,415 @@ start_zap_daemon() {
         -v "${ZAP_REPORT_DIR_ABS}:/zap/wrk:rw" \
         -v "${script_dir}/zap-custom-scripts:/zap/scripts:ro" \
         "${ZAP_DOCKER_IMAGE}" \
-        zap.sh -daemon -host 0.0.0.0 -port 8080 \
-        -config api.key="${ZAP_API_KEY}" \
-        -config api.addrs.addr.name=.* \
-        -config api.addrs.addr.regex=true \
-        > "${ZAP_REPORT_DIR}/zap-container.log" 2>&1
-    
-    if [[ $? -ne 0 ]]; then
-        log_error "Failed to start ZAP Docker container"
-        docker logs "${ZAP_CONTAINER_NAME}" 2>&1 || true
-        exit 1
-    fi
-    
-    log_success "ZAP container started: ${ZAP_CONTAINER_NAME}"
-    
-    # Wait for ZAP to be ready using proper API endpoint
-    log_info "Waiting for ZAP to be ready (this may take 1-2 minutes)..."
+        zap.sh -daemon \
+            -host 0.0.0.0 -port 8080 \
+            -config api.key="${ZAP_API_KEY}" \
+            -config api.addrs.addr.name='.*' \
+            -config api.addrs.addr.regex=true \
+            -config connection.timeoutInSecs=60 \
+        > "${ZAP_REPORT_DIR_ABS}/zap-daemon.log" 2>&1
+
+    log_success "ZAP container started"
+    _wait_for_zap
+}
+
+# Wait until ZAP API is responsive or timeout
+_wait_for_zap() {
     local max_wait=120
-    local wait_count=0
-    local check_interval=5
-    
-    while [[ ${wait_count} -lt ${max_wait} ]]; do
-        # Check if container is still running
+    local elapsed=0
+    local interval=5
+
+    log_info "Waiting for ZAP to be ready (up to ${max_wait}s)..."
+
+    while [[ ${elapsed} -lt ${max_wait} ]]; do
+        # Abort early if the container has already exited
         if ! docker ps --format '{{.Names}}' | grep -q "^${ZAP_CONTAINER_NAME}$"; then
-            log_error "ZAP container stopped unexpectedly"
-            log_error "Container logs:"
+            log_error "ZAP container exited unexpectedly. Logs:"
             docker logs "${ZAP_CONTAINER_NAME}" 2>&1 || true
             exit 1
         fi
-        
-        # Try to connect to ZAP API
-        if curl -s --max-time 5 "http://localhost:8080/JSON/core/view/version/?apikey=${ZAP_API_KEY}" > /dev/null 2>&1; then
-            log_success "ZAP daemon is ready and responding"
-            
-            # Get ZAP version for confirmation
-            local zap_version=$(curl -s "http://localhost:8080/JSON/core/view/version/?apikey=${ZAP_API_KEY}" | grep -o '"version":"[^"]*"' | cut -d'"' -f4 || echo "unknown")
-            log_info "ZAP version: ${zap_version}"
+
+        if curl -sf --max-time 5 \
+               "http://localhost:8080/JSON/core/view/version/?apikey=${ZAP_API_KEY}" \
+               > /dev/null 2>&1; then
+            local zap_ver
+            zap_ver="$(curl -s "http://localhost:8080/JSON/core/view/version/?apikey=${ZAP_API_KEY}" \
+                        | grep -o '"version":"[^"]*"' | cut -d'"' -f4 || echo 'unknown')"
+            log_success "ZAP daemon ready — version ${zap_ver}"
             return 0
         fi
-        
-        sleep ${check_interval}
-        wait_count=$((wait_count + check_interval))
-        
-        if [[ $((wait_count % 15)) -eq 0 ]]; then
-            log_info "Still waiting... (${wait_count}/${max_wait} seconds)"
-        fi
-        
-        # Show container logs every 30 seconds
-        if [[ $((wait_count % 30)) -eq 0 ]]; then
-            log_info "Recent ZAP container logs:"
-            docker logs --tail 10 "${ZAP_CONTAINER_NAME}" 2>&1 | head -n 5 || echo "  (logs not available yet)"
-        fi
+
+        sleep "${interval}"
+        elapsed=$(( elapsed + interval ))
+        [[ $(( elapsed % 30 )) -eq 0 ]] && \
+            log_info "  Still waiting... (${elapsed}/${max_wait}s)"
     done
-    
-    # Timeout reached
-    log_error "ZAP daemon failed to start within ${max_wait} seconds"
-    log_error "Full container logs:"
-    docker logs "${ZAP_CONTAINER_NAME}" 2>&1 || true
-    log_error "Container status:"
-    docker ps -a --filter "name=${ZAP_CONTAINER_NAME}" || true
+
+    log_error "ZAP did not become ready within ${max_wait}s. Final logs:"
+    docker logs --tail 50 "${ZAP_CONTAINER_NAME}" 2>&1 || true
     exit 1
 }
 
-# Load authentication script into ZAP
+# =============================================================================
+# Helper: call ZAP JSON API and return response
+# =============================================================================
+_zap_api() {
+    local endpoint="$1"; shift
+    # remaining "$@" are -d key=value pairs
+    curl -sf --max-time 30 "http://localhost:8080${endpoint}" "$@" || true
+}
+
+# =============================================================================
+# Load IBM SSO authentication script into ZAP
+# =============================================================================
 load_auth_script() {
-    log_info "Loading IBM SSO authentication script into ZAP..."
-    
-    local script_path="$(dirname "$0")/zap-custom-scripts/ibm-sso-auth.js"
-    
-    if [[ ! -f "${script_path}" ]]; then
-        log_error "Authentication script not found: ${script_path}"
+    log_info "Loading IBM SSO authentication script..."
+
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local auth_script="${script_dir}/zap-custom-scripts/ibm-sso-auth.js"
+
+    if [[ ! -f "${auth_script}" ]]; then
+        log_error "Authentication script not found: ${auth_script}"
         exit 1
     fi
-    
-    # Load the script via ZAP API
-    curl -s "http://localhost:8080/JSON/script/action/load/" \
+
+    # The script is mounted into the container at /zap/scripts/ibm-sso-auth.js
+    local container_script="/zap/scripts/ibm-sso-auth.js"
+
+    _zap_api "/JSON/script/action/load/" \
         -d "apikey=${ZAP_API_KEY}" \
         -d "scriptName=IBM-SSO-Auth" \
         -d "scriptType=authentication" \
         -d "scriptEngine=Oracle Nashorn" \
-        -d "fileName=${script_path}" \
-        -d "scriptDescription=IBM SSO Authentication for ICA Applications" \
+        -d "fileName=${container_script}" \
+        -d "scriptDescription=IBM SSO SAML Authentication for ICA Applications" \
         > /dev/null
-    
+
     log_success "Authentication script loaded"
 }
 
-# Create and configure ZAP context
+# =============================================================================
+# Configure ZAP context (scope, authentication, indicators)
+# =============================================================================
 configure_zap_context() {
-    log_info "Configuring ZAP context..."
-    
-    # Create new context
-    curl -s "http://localhost:8080/JSON/context/action/newContext/" \
+    log_info "Configuring ZAP context (${ZAP_CONTEXT_NAME})..."
+
+    # Create context — ZAP auto-assigns contextId=1 for the first context
+    _zap_api "/JSON/context/action/newContext/" \
+        -d "apikey=${ZAP_API_KEY}" \
+        -d "contextName=${ZAP_CONTEXT_NAME}" > /dev/null
+
+    # Include the target URL in context scope
+    _zap_api "/JSON/context/action/includeInContext/" \
         -d "apikey=${ZAP_API_KEY}" \
         -d "contextName=${ZAP_CONTEXT_NAME}" \
-        > /dev/null
-    
-    # Include target URL in context
-    curl -s "http://localhost:8080/JSON/context/action/includeInContext/" \
-        -d "apikey=${ZAP_API_KEY}" \
-        -d "contextName=${ZAP_CONTEXT_NAME}" \
-        -d "regex=${ICA_APP_URL}.*" \
-        > /dev/null
-    
-    # Exclude URLs if specified
-    if [[ -n "${ZAP_EXCLUDE_URLS:-}" ]]; then
-        IFS=',' read -ra EXCLUDE_ARRAY <<< "${ZAP_EXCLUDE_URLS}"
-        for exclude_url in "${EXCLUDE_ARRAY[@]}"; do
-            log_info "Excluding URL pattern: ${exclude_url}"
-            curl -s "http://localhost:8080/JSON/context/action/excludeFromContext/" \
-                -d "apikey=${ZAP_API_KEY}" \
-                -d "contextName=${ZAP_CONTEXT_NAME}" \
-                -d "regex=${exclude_url}" \
-                > /dev/null
-        done
-    fi
-    
-    # Set authentication method to script-based
-    curl -s "http://localhost:8080/JSON/authentication/action/setAuthenticationMethod/" \
+        -d "regex=${ICA_APP_URL}.*" > /dev/null
+
+    # Exclude sensitive URL patterns
+    IFS=',' read -ra _excludes <<< "${ZAP_EXCLUDE_URLS}"
+    for pattern in "${_excludes[@]}"; do
+        log_info "  Excluding: ${pattern}"
+        _zap_api "/JSON/context/action/excludeFromContext/" \
+            -d "apikey=${ZAP_API_KEY}" \
+            -d "contextName=${ZAP_CONTEXT_NAME}" \
+            -d "regex=${pattern}" > /dev/null
+    done
+
+    # Set script-based authentication; pass ICA_APP_URL as a script parameter
+    local encoded_url
+    encoded_url="$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" \
+                    "${ICA_APP_URL}" 2>/dev/null \
+                  || python -c "import urllib,sys; print(urllib.quote(sys.argv[1]))" \
+                    "${ICA_APP_URL}" 2>/dev/null \
+                  || echo "${ICA_APP_URL}")"
+
+    _zap_api "/JSON/authentication/action/setAuthenticationMethod/" \
         -d "apikey=${ZAP_API_KEY}" \
         -d "contextId=1" \
         -d "authMethodName=scriptBasedAuthentication" \
-        -d "authMethodConfigParams=scriptName=IBM-SSO-Auth" \
+        -d "authMethodConfigParams=scriptName%3DIBM-SSO-Auth%26ICA_APP_URL%3D${encoded_url}" \
         > /dev/null
-    
-    # Set logged in indicator (adjust based on your app)
-    curl -s "http://localhost:8080/JSON/authentication/action/setLoggedInIndicator/" \
+
+    # Logged-in indicator — text that appears only when authenticated
+    _zap_api "/JSON/authentication/action/setLoggedInIndicator/" \
         -d "apikey=${ZAP_API_KEY}" \
         -d "contextId=1" \
-        -d "loggedInIndicatorRegex=\\QLogout\\E|\\Qlogout\\E|\\QSign Out\\E" \
+        -d "loggedInIndicatorRegex=\\QLogout\\E|\\Qlogout\\E|\\QSign Out\\E|\\Qsign-out\\E" \
         > /dev/null
-    
-    # Set logged out indicator
-    curl -s "http://localhost:8080/JSON/authentication/action/setLoggedOutIndicator/" \
+
+    # Logged-out indicator — text that appears on the login page
+    _zap_api "/JSON/authentication/action/setLoggedOutIndicator/" \
         -d "apikey=${ZAP_API_KEY}" \
         -d "contextId=1" \
         -d "loggedOutIndicatorRegex=\\QLogin\\E|\\Qlogin\\E|\\QSign In\\E|\\Qw3id.sso.ibm.com\\E" \
         > /dev/null
-    
+
     log_success "ZAP context configured"
 }
 
-# Create authenticated user
+# =============================================================================
+# Create authenticated user in ZAP
+# =============================================================================
 create_authenticated_user() {
-    log_info "Creating authenticated user in ZAP..."
-    
-    # Create user
-    curl -s "http://localhost:8080/JSON/users/action/newUser/" \
+    log_info "Creating authenticated user (IBMSSOUser)..."
+
+    _zap_api "/JSON/users/action/newUser/" \
         -d "apikey=${ZAP_API_KEY}" \
         -d "contextId=1" \
-        -d "name=IBMSSOUser" \
-        > /dev/null
-    
-    # Set user credentials
-    curl -s "http://localhost:8080/JSON/users/action/setAuthenticationCredentials/" \
-        -d "apikey=${ZAP_API_KEY}" \
-        -d "contextId=1" \
-        -d "userId=0" \
-        -d "authCredentialsConfigParams=username=${IBM_SSO_USERNAME}%26password=${IBM_SSO_PASSWORD}" \
-        > /dev/null
-    
-    # Enable user
-    curl -s "http://localhost:8080/JSON/users/action/setUserEnabled/" \
+        -d "name=IBMSSOUser" > /dev/null
+
+    # URL-encode credentials before embedding in the config-params string
+    local enc_user enc_pass
+    enc_user="$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" \
+                 "${IBM_SSO_USERNAME}" 2>/dev/null || echo "${IBM_SSO_USERNAME}")"
+    enc_pass="$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" \
+                 "${IBM_SSO_PASSWORD}" 2>/dev/null || echo "${IBM_SSO_PASSWORD}")"
+
+    _zap_api "/JSON/users/action/setAuthenticationCredentials/" \
         -d "apikey=${ZAP_API_KEY}" \
         -d "contextId=1" \
         -d "userId=0" \
-        -d "enabled=true" \
+        -d "authCredentialsConfigParams=username%3D${enc_user}%26password%3D${enc_pass}" \
         > /dev/null
-    
-    log_success "Authenticated user created"
+
+    _zap_api "/JSON/users/action/setUserEnabled/" \
+        -d "apikey=${ZAP_API_KEY}" \
+        -d "contextId=1" \
+        -d "userId=0" \
+        -d "enabled=true" > /dev/null
+
+    _zap_api "/JSON/forcedUser/action/setForcedUser/" \
+        -d "apikey=${ZAP_API_KEY}" \
+        -d "contextId=1" \
+        -d "userId=0" > /dev/null
+
+    _zap_api "/JSON/forcedUser/action/setForcedUserModeEnabled/" \
+        -d "apikey=${ZAP_API_KEY}" \
+        -d "boolean=true" > /dev/null
+
+    log_success "Authenticated user created and forced-user mode enabled"
 }
 
-# Perform spider scan
+# =============================================================================
+# Spider scan (crawl application as authenticated user)
+# =============================================================================
 perform_spider_scan() {
-    log_info "Starting spider scan..."
-    
-    # Start spider as user
+    log_info "Starting spider scan (max depth: ${ZAP_MAX_DEPTH})..."
+
     local scan_id
-    scan_id=$(curl -s "http://localhost:8080/JSON/spider/action/scanAsUser/" \
+    scan_id="$(_zap_api "/JSON/spider/action/scanAsUser/" \
         -d "apikey=${ZAP_API_KEY}" \
         -d "url=${ICA_APP_URL}" \
         -d "contextId=1" \
         -d "userId=0" \
         -d "maxChildren=${ZAP_MAX_DEPTH}" \
-        -d "recurse=true" | jq -r '.scan')
-    
-    log_info "Spider scan started with ID: ${scan_id}"
-    
-    # Monitor spider progress
+        -d "recurse=true" | grep -o '"scan":"[0-9]*"' | grep -o '[0-9]*' || echo "0")"
+
+    log_info "Spider scan ID: ${scan_id}"
+
     local progress=0
-    while [[ ${progress} -lt 100 ]]; do
-        progress=$(curl -s "http://localhost:8080/JSON/spider/view/status/" \
-            -d "scanId=${scan_id}" | jq -r '.status')
-        log_info "Spider progress: ${progress}%"
+    local spider_timeout=$(( ZAP_SCAN_TIMEOUT * 30 ))  # half of total timeout for spider
+    local elapsed=0
+
+    while [[ "${progress}" != "100" ]]; do
+        progress="$(_zap_api "/JSON/spider/view/status/" \
+            -d "apikey=${ZAP_API_KEY}" \
+            -d "scanId=${scan_id}" | grep -o '"status":"[0-9]*"' | grep -o '[0-9]*' || echo "0")"
+        log_info "  Spider progress: ${progress}%"
+
+        if [[ "${progress}" == "100" ]]; then break; fi
+
         sleep 5
+        elapsed=$(( elapsed + 5 ))
+        if [[ ${elapsed} -ge ${spider_timeout} ]]; then
+            log_warning "Spider timeout reached — stopping spider"
+            _zap_api "/JSON/spider/action/stop/" \
+                -d "apikey=${ZAP_API_KEY}" \
+                -d "scanId=${scan_id}" > /dev/null
+            break
+        fi
     done
-    
-    log_success "Spider scan completed"
+
+    local urls_found
+    urls_found="$(_zap_api "/JSON/spider/view/numberOfResultsForScan/" \
+        -d "apikey=${ZAP_API_KEY}" \
+        -d "scanId=${scan_id}" | grep -o '[0-9]*' | head -1 || echo 'unknown')"
+    log_success "Spider scan completed — URLs found: ${urls_found}"
 }
 
-# Perform active scan
+# =============================================================================
+# Active scan (attack application as authenticated user)
+# =============================================================================
 perform_active_scan() {
-    log_info "Starting active scan..."
-    
-    # Start active scan as user
+    log_info "Starting active scan (timeout: ${ZAP_SCAN_TIMEOUT} minutes)..."
+
     local scan_id
-    scan_id=$(curl -s "http://localhost:8080/JSON/ascan/action/scanAsUser/" \
+    scan_id="$(_zap_api "/JSON/ascan/action/scanAsUser/" \
         -d "apikey=${ZAP_API_KEY}" \
         -d "url=${ICA_APP_URL}" \
         -d "contextId=1" \
         -d "userId=0" \
         -d "recurse=true" \
-        -d "inScopeOnly=true" \
-        -d "scanPolicyName=" \
-        -d "method=" \
-        -d "postData=" | jq -r '.scan')
-    
-    log_info "Active scan started with ID: ${scan_id}"
-    
-    # Monitor active scan progress
+        -d "inScopeOnly=true" | grep -o '"scan":"[0-9]*"' | grep -o '[0-9]*' || echo "0")"
+
+    log_info "Active scan ID: ${scan_id}"
+
     local progress=0
-    local start_time=$(date +%s)
-    local timeout_seconds=$((ZAP_SCAN_TIMEOUT * 60))
-    
-    while [[ ${progress} -lt 100 ]]; do
-        progress=$(curl -s "http://localhost:8080/JSON/ascan/view/status/" \
-            -d "scanId=${scan_id}" | jq -r '.status')
-        log_info "Active scan progress: ${progress}%"
-        
-        # Check timeout
-        local current_time=$(date +%s)
-        local elapsed=$((current_time - start_time))
-        if [[ ${elapsed} -ge ${timeout_seconds} ]]; then
-            log_warning "Scan timeout reached (${ZAP_SCAN_TIMEOUT} minutes)"
-            curl -s "http://localhost:8080/JSON/ascan/action/stop/" \
+    local start_ts
+    start_ts="$(date +%s)"
+    local timeout_s=$(( ZAP_SCAN_TIMEOUT * 60 ))
+
+    while [[ "${progress}" != "100" ]]; do
+        progress="$(_zap_api "/JSON/ascan/view/status/" \
+            -d "apikey=${ZAP_API_KEY}" \
+            -d "scanId=${scan_id}" | grep -o '"status":"[0-9]*"' | grep -o '[0-9]*' || echo "0")"
+        log_info "  Active scan progress: ${progress}%"
+
+        if [[ "${progress}" == "100" ]]; then break; fi
+
+        local now elapsed
+        now="$(date +%s)"
+        elapsed=$(( now - start_ts ))
+        if [[ ${elapsed} -ge ${timeout_s} ]]; then
+            log_warning "Active scan timeout reached (${ZAP_SCAN_TIMEOUT} min) — stopping"
+            _zap_api "/JSON/ascan/action/stop/" \
                 -d "apikey=${ZAP_API_KEY}" \
                 -d "scanId=${scan_id}" > /dev/null
             break
         fi
-        
+
         sleep 10
     done
-    
+
     log_success "Active scan completed"
 }
 
-# Generate reports
+# =============================================================================
+# Generate all report formats
+# =============================================================================
 generate_reports() {
-    log_info "Generating scan reports..."
-    
-    local timestamp=$(date +%Y%m%d_%H%M%S)
-    
-    # HTML Report
-    log_info "Generating HTML report..."
-    curl -s "http://localhost:8080/OTHER/core/other/htmlreport/" \
-        -d "apikey=${ZAP_API_KEY}" \
-        > "${ZAP_REPORT_DIR}/zap-report-${timestamp}.html"
-    
-    # XML Report
-    log_info "Generating XML report..."
-    curl -s "http://localhost:8080/OTHER/core/other/xmlreport/" \
-        -d "apikey=${ZAP_API_KEY}" \
-        > "${ZAP_REPORT_DIR}/zap-report-${timestamp}.xml"
-    
-    # JSON Report
-    log_info "Generating JSON report..."
-    curl -s "http://localhost:8080/JSON/core/view/alerts/" \
-        -d "apikey=${ZAP_API_KEY}" \
-        > "${ZAP_REPORT_DIR}/zap-report-${timestamp}.json"
-    
-    # Markdown Report
-    log_info "Generating Markdown report..."
-    curl -s "http://localhost:8080/OTHER/core/other/mdreport/" \
-        -d "apikey=${ZAP_API_KEY}" \
-        > "${ZAP_REPORT_DIR}/zap-report-${timestamp}.md"
-    
-    log_success "Reports generated in: ${ZAP_REPORT_DIR}"
-    log_info "  - HTML: zap-report-${timestamp}.html"
-    log_info "  - XML: zap-report-${timestamp}.xml"
-    log_info "  - JSON: zap-report-${timestamp}.json"
-    log_info "  - Markdown: zap-report-${timestamp}.md"
+    log_info "Generating scan reports (timestamp: ${SCAN_TIMESTAMP})..."
+
+    local base="${ZAP_REPORT_DIR_ABS}/zap-report-${SCAN_TIMESTAMP}"
+
+    # HTML
+    _zap_api "/OTHER/core/other/htmlreport/" \
+        -d "apikey=${ZAP_API_KEY}" > "${base}.html"
+    log_info "  HTML   : ${base}.html"
+
+    # XML
+    _zap_api "/OTHER/core/other/xmlreport/" \
+        -d "apikey=${ZAP_API_KEY}" > "${base}.xml"
+    log_info "  XML    : ${base}.xml"
+
+    # JSON — ZAP /core/view/alerts returns {"alerts":[...]}
+    _zap_api "/JSON/core/view/alerts/" \
+        -d "apikey=${ZAP_API_KEY}" > "${base}.json"
+    log_info "  JSON   : ${base}.json"
+
+    # Markdown (available from ZAP 2.11+; gracefully skipped if absent)
+    local md_response
+    md_response="$(_zap_api "/OTHER/core/other/mdreport/" \
+        -d "apikey=${ZAP_API_KEY}" 2>/dev/null || echo "")"
+    if [[ -n "${md_response}" ]]; then
+        echo "${md_response}" > "${base}.md"
+        log_info "  Markdown: ${base}.md"
+    fi
+
+    log_success "Reports saved to: ${ZAP_REPORT_DIR_ABS}"
 }
 
-# Analyze results and check thresholds
+# =============================================================================
+# Analyse results and compare against the configured threshold
+# =============================================================================
 analyze_results() {
-    log_info "Analyzing scan results..."
-    
-    local timestamp=$(date +%Y%m%d_%H%M%S)
-    local json_report="${ZAP_REPORT_DIR}/zap-report-${timestamp}.json"
-    
+    log_info "Analysing scan results against threshold: ${ZAP_ALERT_THRESHOLD}..."
+
+    local json_report="${ZAP_REPORT_DIR_ABS}/zap-report-${SCAN_TIMESTAMP}.json"
+
     if [[ ! -f "${json_report}" ]]; then
         log_error "JSON report not found: ${json_report}"
         return 1
     fi
-    
-    # Count alerts by risk level
-    local high_alerts=$(jq '[.alerts[] | select(.risk == "High")] | length' "${json_report}")
-    local medium_alerts=$(jq '[.alerts[] | select(.risk == "Medium")] | length' "${json_report}")
-    local low_alerts=$(jq '[.alerts[] | select(.risk == "Low")] | length' "${json_report}")
-    local info_alerts=$(jq '[.alerts[] | select(.risk == "Informational")] | length' "${json_report}")
-    
+
+    # ZAP /core/view/alerts returns {"alerts":[...]} — use .alerts[] not .alerts[].risk
+    local high med low info
+    high="$(jq '[.alerts[] | select(.risk == "High")]   | length' "${json_report}" 2>/dev/null || echo 0)"
+    med="$(jq  '[.alerts[] | select(.risk == "Medium")] | length' "${json_report}" 2>/dev/null || echo 0)"
+    low="$(jq  '[.alerts[] | select(.risk == "Low")]    | length' "${json_report}" 2>/dev/null || echo 0)"
+    info="$(jq '[.alerts[] | select(.risk == "Informational")] | length' "${json_report}" 2>/dev/null || echo 0)"
+
     log_info "Scan Results Summary:"
-    log_info "  High Risk Alerts: ${high_alerts}"
-    log_info "  Medium Risk Alerts: ${medium_alerts}"
-    log_info "  Low Risk Alerts: ${low_alerts}"
-    log_info "  Informational Alerts: ${info_alerts}"
-    
-    # Check against threshold
-    local fail_scan=false
-    case "${ZAP_ALERT_THRESHOLD}" in
+    log_info "  High Alerts          : ${high}"
+    log_info "  Medium Alerts        : ${med}"
+    log_info "  Low Alerts           : ${low}"
+    log_info "  Informational Alerts : ${info}"
+
+    # Write a machine-readable summary alongside the reports
+    cat > "${ZAP_REPORT_DIR_ABS}/zap-results-${SCAN_TIMESTAMP}.json" <<EOF
+{
+  "scan_timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "target_url": "${ICA_APP_URL}",
+  "alert_threshold": "${ZAP_ALERT_THRESHOLD}",
+  "alerts": {
+    "high": ${high},
+    "medium": ${med},
+    "low": ${low},
+    "informational": ${info}
+  }
+}
+EOF
+
+    local fail=false
+    case "${ZAP_ALERT_THRESHOLD^^}" in
         HIGH)
-            if [[ ${high_alerts} -gt 0 ]]; then
-                log_error "Scan failed: Found ${high_alerts} HIGH risk alerts (threshold: HIGH)"
-                fail_scan=true
-            fi
+            [[ ${high} -gt 0 ]] && { log_error "FAIL: ${high} HIGH alert(s) found"; fail=true; }
             ;;
         MEDIUM)
-            if [[ ${high_alerts} -gt 0 ]] || [[ ${medium_alerts} -gt 0 ]]; then
-                log_error "Scan failed: Found ${high_alerts} HIGH and ${medium_alerts} MEDIUM risk alerts (threshold: MEDIUM)"
-                fail_scan=true
-            fi
+            { [[ ${high} -gt 0 ]] || [[ ${med} -gt 0 ]]; } && \
+                { log_error "FAIL: ${high} HIGH and ${med} MEDIUM alert(s) found"; fail=true; }
             ;;
         LOW)
-            if [[ ${high_alerts} -gt 0 ]] || [[ ${medium_alerts} -gt 0 ]] || [[ ${low_alerts} -gt 0 ]]; then
-                log_error "Scan failed: Found vulnerabilities above LOW threshold"
-                fail_scan=true
-            fi
+            { [[ ${high} -gt 0 ]] || [[ ${med} -gt 0 ]] || [[ ${low} -gt 0 ]]; } && \
+                { log_error "FAIL: vulnerabilities found above LOW threshold"; fail=true; }
+            ;;
+        INFORMATIONAL)
+            { [[ ${high} -gt 0 ]] || [[ ${med} -gt 0 ]] || [[ ${low} -gt 0 ]] || [[ ${info} -gt 0 ]]; } && \
+                { log_error "FAIL: alerts found (threshold: INFORMATIONAL)"; fail=true; }
             ;;
     esac
-    
-    if [[ "${fail_scan}" == "true" ]]; then
+
+    if [[ "${fail}" == "true" ]]; then
         return 1
-    else
-        log_success "Scan passed: No alerts above ${ZAP_ALERT_THRESHOLD} threshold"
-        return 0
     fi
+
+    log_success "PASS: no alerts above ${ZAP_ALERT_THRESHOLD} threshold"
+    return 0
 }
 
-# Cleanup
+# =============================================================================
+# Cleanup Docker container
+# =============================================================================
 cleanup() {
-    log_info "Cleaning up..."
-    
-    # Stop and remove ZAP container
+    log_info "Cleaning up ZAP container..."
     if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${ZAP_CONTAINER_NAME}$"; then
-        log_info "Stopping ZAP container..."
-        docker stop "${ZAP_CONTAINER_NAME}" > /dev/null 2>&1 || true
-        log_info "Removing ZAP container..."
-        docker rm "${ZAP_CONTAINER_NAME}" > /dev/null 2>&1 || true
+        docker stop  "${ZAP_CONTAINER_NAME}" > /dev/null 2>&1 || true
+        docker rm -f "${ZAP_CONTAINER_NAME}" > /dev/null 2>&1 || true
+        log_success "ZAP container removed"
     fi
-    
-    log_success "Cleanup completed"
 }
 
-# Main execution
+# =============================================================================
+# Main
+# =============================================================================
 main() {
-    log_info "Starting ZAP Full Scan with IBM SSO Authentication"
-    log_info "=================================================="
-    
-    # Set trap for cleanup
+    log_info "=============================================="
+    log_info " ZAP Full Scan with IBM SSO Authentication   "
+    log_info "=============================================="
+
     trap cleanup EXIT
-    
-    # Execute scan steps
+
     validate_environment
     set_defaults
     start_zap_daemon
@@ -510,18 +561,21 @@ main() {
     perform_spider_scan
     perform_active_scan
     generate_reports
-    
-    # Analyze results and exit with appropriate code
+
     if analyze_results; then
-        log_success "ZAP Full Scan completed successfully"
+        log_success "=============================================="
+        log_success " ZAP Scan PASSED                              "
+        log_success "=============================================="
         exit 0
     else
-        log_error "ZAP Full Scan completed with failures"
+        log_error "=============================================="
+        log_error " ZAP Scan FAILED — review reports             "
+        log_error " Reports: ${ZAP_REPORT_DIR_ABS}               "
+        log_error "=============================================="
         exit 1
     fi
 }
 
-# Run main function
 main "$@"
 
 # Made with Bob
