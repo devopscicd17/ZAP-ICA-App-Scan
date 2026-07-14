@@ -124,7 +124,7 @@ setup_zap_docker() {
     
     # Pull ZAP Docker image
     log_info "Pulling OWASP ZAP Docker image..."
-    docker pull owasp/zap2docker-stable:latest || {
+    ghcr.io/zaproxy/zaproxy:stable || {
         log_error "Failed to pull ZAP Docker image"
         exit 1
     }
