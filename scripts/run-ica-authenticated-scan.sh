@@ -66,7 +66,10 @@ setup_environment() {
     # Get app URL from pipeline environment
     if [[ -z "${ICA_APP_URL:-}" ]]; then
         # Try to get from app-url pipeline variable
-        ICA_APP_URL="$(get_env app-url "")"
+        ICA_APP_URL="${ICA_APP_URL:-${APP_URL:-}}"
+        if [[ -z "$ICA_APP_URL" ]] && command -v get_env >/dev/null 2>&1; then
+            ICA_APP_URL="$(get_env app-url "")"
+        fi
         
         if [[ -z "${ICA_APP_URL}" ]]; then
             log_error "ICA_APP_URL not set. Please provide the application URL."
@@ -124,7 +127,7 @@ setup_zap_docker() {
     
     # Pull ZAP Docker image
     log_info "Pulling OWASP ZAP Docker image..."
-    ghcr.io/zaproxy/zaproxy:stable || {
+    docker pull ghcr.io/zaproxy/zaproxy:stable || {
         log_error "Failed to pull ZAP Docker image"
         exit 1
     }
@@ -440,4 +443,4 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     exit $?
 fi
 
-# Made with Bob
+
