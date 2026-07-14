@@ -66,10 +66,7 @@ setup_environment() {
     # Get app URL from pipeline environment
     if [[ -z "${ICA_APP_URL:-}" ]]; then
         # Try to get from app-url pipeline variable
-        ICA_APP_URL="${ICA_APP_URL:-${APP_URL:-}}"
-        if [[ -z "$ICA_APP_URL" ]] && command -v get_env >/dev/null 2>&1; then
-            ICA_APP_URL="$(get_env app-url "")"
-        fi
+        ICA_APP_URL="$(get_env app_url "")"
         
         if [[ -z "${ICA_APP_URL}" ]]; then
             log_error "ICA_APP_URL not set. Please provide the application URL."
@@ -83,7 +80,7 @@ setup_environment() {
     
     # Get credentials from pipeline secrets
     if [[ -z "${IBM_SSO_USERNAME:-}" ]]; then
-        IBM_SSO_USERNAME="$(get_env ibm-sso-username "")"
+        IBM_SSO_USERNAME="$(get_env ibm_sso_username "")"
         if [[ -z "${IBM_SSO_USERNAME}" ]]; then
             log_error "IBM_SSO_USERNAME not set. Please configure IBM SSO credentials."
             exit 1
@@ -92,7 +89,7 @@ setup_environment() {
     fi
     
     if [[ -z "${IBM_SSO_PASSWORD:-}" ]]; then
-        IBM_SSO_PASSWORD="$(get_env ibm-sso-password "")"
+        IBM_SSO_PASSWORD="$(get_env ibm_sso_password "")"
         if [[ -z "${IBM_SSO_PASSWORD}" ]]; then
             log_error "IBM_SSO_PASSWORD not set. Please configure IBM SSO credentials."
             exit 1
@@ -127,7 +124,7 @@ setup_zap_docker() {
     
     # Pull ZAP Docker image
     log_info "Pulling OWASP ZAP Docker image..."
-    docker pull ghcr.io/zaproxy/zaproxy:stable || {
+    docker pull owasp/zap2docker-stable:latest || {
         log_error "Failed to pull ZAP Docker image"
         exit 1
     }
@@ -443,4 +440,4 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     exit $?
 fi
 
-
+# Made with Bob
