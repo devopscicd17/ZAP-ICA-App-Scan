@@ -45,9 +45,10 @@ WORKSPACE_DIR="${WORKSPACE:-$(pwd)}"
 # Step 1 — Load environment configuration
 # =============================================================================
 setup_environment() {
-    # Load ZAP tuning defaults. Uses ${VAR:-default} so already-exported vars win.
-    # Credentials (ICA_APP_URL, IBM_SSO_USERNAME, IBM_SSO_PASSWORD) are NOT set
-    # here — they must be exported by the caller before invoking this script.
+    # ------------------------------------------------------------------
+    # Load ZAP tuning defaults first. Uses ${VAR:-default} so any variable
+    # already exported by the caller wins over the defaults in this file.
+    # ------------------------------------------------------------------
     local env_file="${SCRIPT_DIR}/zap-custom-scripts/.env.ica-authenticated-scan.sh"
     if [[ -f "${env_file}" ]]; then
         # shellcheck disable=SC1090
@@ -55,16 +56,79 @@ setup_environment() {
         log_info "Defaults loaded from: ${env_file}"
     fi
 
-    # Validate that the caller supplied the required credentials.
+    # ------------------------------------------------------------------
+    # Resolve credentials.
+    #
+    # Three invocation contexts are supported, tried in priority order:
+    #
+    #   1. Already exported (e.g. called from .pipeline-config.yaml stage).
+    #
+    #   2. Tekton / One-Pipeline: get_env is available.
+    #      Property names use underscores: app_url, ibm_sso_username, etc.
+    #
+    #   3. Classic Pipeline: get_env does NOT exist.
+    #      IBM injects Stage "Environment properties" directly as shell env
+    #      vars using the exact property name. app_url → $app_url, etc.
+    #
+    # All property names must use underscores — dashes silently return "".
+    # ------------------------------------------------------------------
+
+    # ICA_APP_URL
+    if [[ -z "${ICA_APP_URL:-}" ]]; then
+        if command -v get_env &>/dev/null; then
+            ICA_APP_URL="$(get_env app_url "")"
+        else
+            ICA_APP_URL="${app_url:-}"          # Classic Pipeline injection
+        fi
+        export ICA_APP_URL
+    fi
+
+    # IBM_SSO_USERNAME
+    if [[ -z "${IBM_SSO_USERNAME:-}" ]]; then
+        if command -v get_env &>/dev/null; then
+            IBM_SSO_USERNAME="$(get_env ibm_sso_username "")"
+        else
+            IBM_SSO_USERNAME="${ibm_sso_username:-}"   # Classic Pipeline injection
+        fi
+        export IBM_SSO_USERNAME
+    fi
+
+    # IBM_SSO_PASSWORD
+    if [[ -z "${IBM_SSO_PASSWORD:-}" ]]; then
+        if command -v get_env &>/dev/null; then
+            IBM_SSO_PASSWORD="$(get_env ibm_sso_password "")"
+        else
+            IBM_SSO_PASSWORD="${ibm_sso_password:-}"   # Classic Pipeline injection
+        fi
+        export IBM_SSO_PASSWORD
+    fi
+
+    # Optional tuning vars — also injected directly in Classic Pipeline
+    if [[ -z "${ZAP_SCAN_TIMEOUT:-}" ]]    && [[ -n "${zap_scan_timeout:-}" ]];    then export ZAP_SCAN_TIMEOUT="${zap_scan_timeout}"; fi
+    if [[ -z "${ZAP_ALERT_THRESHOLD:-}" ]] && [[ -n "${zap_alert_threshold:-}" ]]; then export ZAP_ALERT_THRESHOLD="${zap_alert_threshold}"; fi
+    if [[ -z "${ZAP_MAX_DEPTH:-}" ]]       && [[ -n "${zap_max_depth:-}" ]];       then export ZAP_MAX_DEPTH="${zap_max_depth}"; fi
+    if [[ -z "${ZAP_DOCKER_IMAGE:-}" ]]    && [[ -n "${zap_docker_image:-}" ]];    then export ZAP_DOCKER_IMAGE="${zap_docker_image}"; fi
+
+    # ------------------------------------------------------------------
+    # Validate — all three must be set by now.
+    # ------------------------------------------------------------------
     local missing=""
-    [[ -z "${ICA_APP_URL:-}"      ]] && missing="${missing} ICA_APP_URL"
-    [[ -z "${IBM_SSO_USERNAME:-}" ]] && missing="${missing} IBM_SSO_USERNAME"
-    [[ -z "${IBM_SSO_PASSWORD:-}" ]] && missing="${missing} IBM_SSO_PASSWORD"
+    [[ -z "${ICA_APP_URL:-}"      ]] && missing="${missing}\n  app_url"
+    [[ -z "${IBM_SSO_USERNAME:-}" ]] && missing="${missing}\n  ibm_sso_username"
+    [[ -z "${IBM_SSO_PASSWORD:-}" ]] && missing="${missing}\n  ibm_sso_password"
 
     if [[ -n "${missing}" ]]; then
-        log_error "Missing required variables:${missing}"
-        log_error "These must be set before calling this script."
-        log_error "In Toolchain: set app_url / ibm_sso_username / ibm_sso_password in Secure Properties."
+        echo "" >&2
+        echo "======================================================" >&2
+        echo " ZAP Scan FAILED: Toolchain Secure Properties missing" >&2
+        echo "" >&2
+        echo " Add these properties in:" >&2
+        echo " Toolchain UI → your Pipeline → Settings → Secure Properties" >&2
+        echo "" >&2
+        printf "%b\n" "${missing}" >&2
+        echo "" >&2
+        echo " IMPORTANT: names must use underscores, not dashes." >&2
+        echo "======================================================" >&2
         return 1
     fi
 

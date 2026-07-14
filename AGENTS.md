@@ -9,6 +9,11 @@ A set of bash scripts + ZAP JavaScript for running OWASP ZAP DAST with IBM w3id 
 `get_env` silently returns empty string for any property name containing a dash.
 Use `app_url`, `ibm_sso_username`, `ibm_sso_password`, `opt_in_ica_scan` — **never** `app-url`, `ibm-sso-username`, etc.
 
+## Critical: Classic Pipeline vs Tekton — two completely different environments
+- **Classic Pipeline** (Stage → Jobs tab job script): `get_env` does **not exist**. Environment properties from the "Environment properties" tab are injected as lowercase shell variables directly — `app_url` → `$app_url`, `ibm_sso_username` → `$ibm_sso_username`. There is no `.pipeline-config.yaml` involvement.
+- **Tekton / One-Pipeline**: `get_env` exists. `.pipeline-config.yaml` stages run. Properties come from the pipeline configuration.
+- `run-ica-authenticated-scan.sh` handles both: tries `get_env` first, falls back to the lowercase shell var injection.
+
 ## Critical: password retrieval must be wrapped in `set +x` / `set -x`
 ```bash
 set +x
