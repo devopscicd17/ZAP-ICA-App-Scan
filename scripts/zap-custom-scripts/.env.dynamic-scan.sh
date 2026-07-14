@@ -4,10 +4,10 @@
 
 # Set filter options to Low to prevent a false positive by zap-ui
 # https://ibm-cloudplatform.slack.com/archives/C010DQ17EPJ/p1707120778488449
-set_env filter-options "Low,Informational"
+export filter_options="${filter_options:-Low,Informational}"
 
 # Configure the API_DATA_FILE
-if [ -f "${API_DATA_FILE}" ]; then
+if [[ -n "${API_DATA_FILE:-}" ]] && [[ -f "${API_DATA_FILE}" ]]; then
     TMP_API_DATA_FILE=$(mktemp)
 
     # TODO: replace with "apisToScan": ["all"],
