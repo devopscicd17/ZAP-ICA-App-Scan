@@ -5,6 +5,15 @@ This file provides guidance to agents when working with code in this repository.
 ## What this repo is
 A set of bash scripts + ZAP JavaScript for running OWASP ZAP DAST with IBM w3id SAML2 SSO against ICA-hosted apps from an IBM Cloud Toolchain pipeline.
 
+## Pipeline runner: Custom Docker Image (ghcr.io/zaproxy/zaproxy:stable)
+The Classic Pipeline job runs **inside** the ZAP container. `zap.sh` is at `/zap/zap.sh`. There is no Docker daemon — the script calls `zap.sh -cmd -autorun` directly. The automation plan YAML is generated at runtime with credentials substituted in (ZAP's own `${VAR}` substitution is unreliable across versions).
+
+The Build script in the Jobs tab must be exactly:
+```bash
+#!/bin/bash
+bash scripts/run-ica-authenticated-scan.sh
+```
+
 ## Critical: IBM Toolchain property names use underscores only
 `get_env` silently returns empty string for any property name containing a dash.
 Use `app_url`, `ibm_sso_username`, `ibm_sso_password`, `opt_in_ica_scan` — **never** `app-url`, `ibm-sso-username`, etc.

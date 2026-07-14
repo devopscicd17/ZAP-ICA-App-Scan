@@ -1,30 +1,29 @@
 #!/usr/bin/env bash
 #
-# IBM Cloud Toolchain Pipeline Wrapper for ZAP Authenticated Scan
-# Can be sourced or executed directly from a pipeline stage script.
+# IBM Cloud Toolchain — ZAP Authenticated Scan for ICA Applications
 #
-# Usage in .pipeline-config.yaml:
-#   ica-security-scan:
-#     dind: true
-#     script: |
-#       #!/usr/bin/env bash
-#       # IBM Toolchain Secure Properties must use underscores (not dashes)
-#       export ICA_APP_URL="$(get_env app_url "")"
-#       export IBM_SSO_USERNAME="$(get_env ibm_sso_username "")"
-#       set +x
-#       export IBM_SSO_PASSWORD="$(get_env ibm_sso_password "")"
-#       set -x
-#       cd "$WORKSPACE/$(load_repo app-repo path)"
-#       source scripts/run-ica-authenticated-scan.sh
+# Designed for the Classic Pipeline "Custom Docker Image" builder type using
+# ghcr.io/zaproxy/zaproxy:stable as the job image.  ZAP's zap.sh is called
+# directly — no Docker-in-Docker required.
 #
-# Or execute directly:
-#   bash scripts/run-ica-authenticated-scan.sh
+# The script also works when called from a Tekton stage (where credentials
+# are already exported) or locally (where they are set in the environment).
+#
+# Pipeline "Environment properties" required (underscores only):
+#   app_url            — Target ICA application URL
+#   ibm_sso_username   — IBM w3id email address
+#   ibm_sso_password   — IBM w3id password (use Secure type)
+#
+# Optional properties:
+#   zap_scan_timeout   — Active scan timeout in minutes (default: 60)
+#   zap_alert_threshold — HIGH | MEDIUM | LOW              (default: MEDIUM)
+#   zap_max_depth      — Spider crawl depth               (default: 5)
 #
 
 set -euo pipefail
 
 # =============================================================================
-# Colour helpers (disabled when not a TTY)
+# Colour helpers — disabled when not a TTY (pipeline log output)
 # =============================================================================
 if [[ -t 1 ]]; then
     RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -37,18 +36,15 @@ log_success() { echo -e "${GREEN}[SUCCESS]${NC} $*"; }
 log_warning() { echo -e "${YELLOW}[WARNING]${NC} $*"; }
 log_error()   { echo -e "${RED}[ERROR]${NC}   $*" >&2; }
 
-# Resolve the directory containing this script (works when sourced too)
+# Directory containing this script (works whether called or sourced)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="${WORKSPACE:-$(pwd)}"
 
 # =============================================================================
-# Step 1 — Load environment configuration
+# Step 1 — Resolve and validate credentials
 # =============================================================================
 setup_environment() {
-    # ------------------------------------------------------------------
-    # Load ZAP tuning defaults first. Uses ${VAR:-default} so any variable
-    # already exported by the caller wins over the defaults in this file.
-    # ------------------------------------------------------------------
+    # Load ZAP tuning defaults (${VAR:-default} so caller-exported vars win).
     local env_file="${SCRIPT_DIR}/zap-custom-scripts/.env.ica-authenticated-scan.sh"
     if [[ -f "${env_file}" ]]; then
         # shellcheck disable=SC1090
@@ -57,20 +53,12 @@ setup_environment() {
     fi
 
     # ------------------------------------------------------------------
-    # Resolve credentials.
+    # Resolve credentials — three contexts in priority order:
     #
-    # Three invocation contexts are supported, tried in priority order:
-    #
-    #   1. Already exported (e.g. called from .pipeline-config.yaml stage).
-    #
-    #   2. Tekton / One-Pipeline: get_env is available.
-    #      Property names use underscores: app_url, ibm_sso_username, etc.
-    #
-    #   3. Classic Pipeline: get_env does NOT exist.
-    #      IBM injects Stage "Environment properties" directly as shell env
-    #      vars using the exact property name. app_url → $app_url, etc.
-    #
-    # All property names must use underscores — dashes silently return "".
+    #   1. Already exported by caller (Tekton stage / local run).
+    #   2. Tekton get_env built-in (One-Pipeline).
+    #   3. Classic Pipeline direct injection: property name == env var name.
+    #      e.g. "app_url" property → $app_url shell variable.
     # ------------------------------------------------------------------
 
     # ICA_APP_URL
@@ -78,7 +66,7 @@ setup_environment() {
         if command -v get_env &>/dev/null; then
             ICA_APP_URL="$(get_env app_url "")"
         else
-            ICA_APP_URL="${app_url:-}"          # Classic Pipeline injection
+            ICA_APP_URL="${app_url:-}"
         fi
         export ICA_APP_URL
     fi
@@ -88,7 +76,7 @@ setup_environment() {
         if command -v get_env &>/dev/null; then
             IBM_SSO_USERNAME="$(get_env ibm_sso_username "")"
         else
-            IBM_SSO_USERNAME="${ibm_sso_username:-}"   # Classic Pipeline injection
+            IBM_SSO_USERNAME="${ibm_sso_username:-}"
         fi
         export IBM_SSO_USERNAME
     fi
@@ -98,159 +86,302 @@ setup_environment() {
         if command -v get_env &>/dev/null; then
             IBM_SSO_PASSWORD="$(get_env ibm_sso_password "")"
         else
-            IBM_SSO_PASSWORD="${ibm_sso_password:-}"   # Classic Pipeline injection
+            IBM_SSO_PASSWORD="${ibm_sso_password:-}"
         fi
         export IBM_SSO_PASSWORD
     fi
 
-    # Optional tuning vars — also injected directly in Classic Pipeline
+    # Optional tuning — pick up Classic Pipeline injected vars if not already set
     if [[ -z "${ZAP_SCAN_TIMEOUT:-}" ]]    && [[ -n "${zap_scan_timeout:-}" ]];    then export ZAP_SCAN_TIMEOUT="${zap_scan_timeout}"; fi
     if [[ -z "${ZAP_ALERT_THRESHOLD:-}" ]] && [[ -n "${zap_alert_threshold:-}" ]]; then export ZAP_ALERT_THRESHOLD="${zap_alert_threshold}"; fi
     if [[ -z "${ZAP_MAX_DEPTH:-}" ]]       && [[ -n "${zap_max_depth:-}" ]];       then export ZAP_MAX_DEPTH="${zap_max_depth}"; fi
-    if [[ -z "${ZAP_DOCKER_IMAGE:-}" ]]    && [[ -n "${zap_docker_image:-}" ]];    then export ZAP_DOCKER_IMAGE="${zap_docker_image}"; fi
 
-    # ------------------------------------------------------------------
-    # Validate — all three must be set by now.
-    # ------------------------------------------------------------------
+    # Apply defaults for tuning vars
+    export ZAP_SCAN_TIMEOUT="${ZAP_SCAN_TIMEOUT:-60}"
+    export ZAP_ALERT_THRESHOLD="${ZAP_ALERT_THRESHOLD:-MEDIUM}"
+    export ZAP_MAX_DEPTH="${ZAP_MAX_DEPTH:-5}"
+
+    # Validate
     local missing=""
-    [[ -z "${ICA_APP_URL:-}"      ]] && missing="${missing}\n  app_url"
-    [[ -z "${IBM_SSO_USERNAME:-}" ]] && missing="${missing}\n  ibm_sso_username"
-    [[ -z "${IBM_SSO_PASSWORD:-}" ]] && missing="${missing}\n  ibm_sso_password"
+    [[ -z "${ICA_APP_URL:-}"      ]] && missing="${missing}\n  app_url          — ICA application URL"
+    [[ -z "${IBM_SSO_USERNAME:-}" ]] && missing="${missing}\n  ibm_sso_username — IBM w3id email"
+    [[ -z "${IBM_SSO_PASSWORD:-}" ]] && missing="${missing}\n  ibm_sso_password — IBM w3id password"
 
     if [[ -n "${missing}" ]]; then
         echo "" >&2
         echo "======================================================" >&2
-        echo " ZAP Scan FAILED: Toolchain Secure Properties missing" >&2
+        echo " ZAP Scan FAILED: Toolchain properties not set" >&2
         echo "" >&2
-        echo " Add these properties in:" >&2
-        echo " Toolchain UI → your Pipeline → Settings → Secure Properties" >&2
-        echo "" >&2
+        echo " Add these in Toolchain → Pipeline → Stage →" >&2
+        echo " 'Environment properties' tab (use underscores):" >&2
         printf "%b\n" "${missing}" >&2
-        echo "" >&2
-        echo " IMPORTANT: names must use underscores, not dashes." >&2
         echo "======================================================" >&2
         return 1
     fi
 
-    # Place reports inside the pipeline workspace so they survive the stage.
+    # Report directory — use pipeline workspace if available
     export ZAP_REPORT_DIR="${ZAP_REPORT_DIR:-${WORKSPACE_DIR}/zap-reports}"
     mkdir -p "${ZAP_REPORT_DIR}"
 
     log_success "Environment setup complete"
-    log_info "  Target URL : ${ICA_APP_URL}"
-    log_info "  SSO User   : ${IBM_SSO_USERNAME}"
-    log_info "  Report Dir : ${ZAP_REPORT_DIR}"
+    log_info "  Target URL       : ${ICA_APP_URL}"
+    log_info "  SSO User         : ${IBM_SSO_USERNAME}"
+    log_info "  Alert Threshold  : ${ZAP_ALERT_THRESHOLD}"
+    log_info "  Scan Timeout     : ${ZAP_SCAN_TIMEOUT} min"
+    log_info "  Report Dir       : ${ZAP_REPORT_DIR}"
 }
 
 # =============================================================================
-# Step 2 — Verify Docker is available and the socket is accessible
+# Step 2 — Locate zap.sh
 # =============================================================================
-setup_zap_docker() {
-    log_info "Checking Docker availability..."
+find_zap() {
+    # When running inside ghcr.io/zaproxy/zaproxy:stable the binary is at /zap/zap.sh
+    for candidate in /zap/zap.sh "$(command -v zap.sh 2>/dev/null || true)"; do
+        if [[ -n "${candidate}" && -x "${candidate}" ]]; then
+            ZAP_SH="${candidate}"
+            log_success "ZAP found: ${ZAP_SH}"
+            return 0
+        fi
+    done
 
-    if ! command -v docker &>/dev/null; then
-        log_error "Docker binary not found."
-        log_error ""
-        log_error "Classic Pipeline fix:"
-        log_error "  Stage → Jobs tab → your job → Builder type → set to 'Docker image'"
-        log_error "  OR: Stage → Workers tab → enable 'Use Docker'"
-        log_error ""
-        log_error "Tekton / .pipeline-config.yaml fix:"
-        log_error "  Add  dind: true  to the stage definition."
-        return 1
-    fi
-
-    # Test the socket — 'docker info' fails immediately if the daemon is not running
-    if ! docker info &>/dev/null; then
-        log_error "Docker binary found ($(docker --version)) but the daemon is not accessible."
-        log_error ""
-        log_error "Classic Pipeline fix:"
-        log_error "  1. Open your Toolchain → Pipeline → Stage settings"
-        log_error "  2. Go to the 'Workers' tab"
-        log_error "  3. Check 'Enable Docker'"
-        log_error "  OR change the job 'Builder type' to a Docker-based builder."
-        log_error ""
-        log_error "Tekton / .pipeline-config.yaml fix:"
-        log_error "  Add  dind: true  to the ica-security-scan stage."
-        return 1
-    fi
-
-    log_info "Docker: $(docker --version)"
-    log_success "Docker daemon accessible"
+    log_error "zap.sh not found. This script must run inside the ZAP Docker image."
+    log_error ""
+    log_error "In your Classic Pipeline job:"
+    log_error "  Builder type    : Custom Docker Image"
+    log_error "  Docker image    : ghcr.io/zaproxy/zaproxy:stable"
+    return 1
 }
 
 # =============================================================================
-# Step 3 — Execute the full scan (daemon + spider + active scan + reports)
+# Step 3 — Generate the ZAP Automation Framework plan with actual values
+# =============================================================================
+generate_automation_plan() {
+    local plan_dir="${ZAP_REPORT_DIR}"
+    local plan_file="${plan_dir}/automation-plan.yaml"
+    local auth_script="${SCRIPT_DIR}/zap-custom-scripts/ibm-sso-auth.js"
+
+    if [[ ! -f "${auth_script}" ]]; then
+        log_error "IBM SSO auth script not found: ${auth_script}"
+        return 1
+    fi
+
+    log_info "Generating automation plan..."
+
+    # ZAP reads ${VAR} substitution only in some fields — safest to write the
+    # actual values directly into the plan file so nothing depends on ZAP's
+    # variable substitution support.
+    cat > "${plan_file}" <<YAML
+---
+env:
+  contexts:
+    - name: ICA-App-Context
+      urls:
+        - "${ICA_APP_URL}"
+      includePaths:
+        - "${ICA_APP_URL}.*"
+      excludePaths:
+        - ".*logout.*"
+        - ".*signout.*"
+        - ".*sign-out.*"
+        - ".*\\.pdf\$"
+        - ".*\\.zip\$"
+      authentication:
+        method: "script"
+        parameters:
+          scriptName: "IBM-SSO-Auth"
+          scriptEngine: "Oracle Nashorn"
+          ICA_APP_URL: "${ICA_APP_URL}"
+          IBM_SSO_LOGIN_URL: "${IBM_SSO_LOGIN_URL:-https://w3id.sso.ibm.com/auth/sps/samlidp2/saml20}"
+        verification:
+          method: "response"
+          loggedInRegex: "\\\\QLogout\\\\E|\\\\Qlogout\\\\E|\\\\QSign Out\\\\E"
+          loggedOutRegex: "\\\\QLogin\\\\E|\\\\Qlogin\\\\E|\\\\Qw3id.sso.ibm.com\\\\E"
+          pollFrequency: 60
+          pollUnits: "requests"
+      users:
+        - name: "IBMSSOUser"
+          credentials:
+            username: "${IBM_SSO_USERNAME}"
+            password: "${IBM_SSO_PASSWORD}"
+  parameters:
+    failOnError: true
+    failOnWarning: false
+    progressToStdout: true
+
+jobs:
+
+  - type: script
+    name: "Load IBM SSO Auth Script"
+    parameters:
+      action: add
+      type: authentication
+      engine: "Oracle Nashorn"
+      name: "IBM-SSO-Auth"
+      fileName: "${auth_script}"
+
+  - type: spider
+    name: "Spider ICA Application"
+    parameters:
+      context: ICA-App-Context
+      user: IBMSSOUser
+      maxDuration: $(( ZAP_SCAN_TIMEOUT / 2 ))
+      maxDepth: ${ZAP_MAX_DEPTH}
+      maxChildren: 0
+      acceptCookies: true
+      threadCount: 2
+
+  - type: passiveScan-wait
+    name: "Wait for Passive Scan"
+    parameters:
+      maxDuration: 10
+
+  - type: activeScan
+    name: "Active Scan ICA Application"
+    parameters:
+      context: ICA-App-Context
+      user: IBMSSOUser
+      maxDuration: ${ZAP_SCAN_TIMEOUT}
+      maxRuleDurationInMins: 5
+      threadPerHost: 2
+      handleAntiCSRFTokens: true
+
+  - type: report
+    name: "HTML Report"
+    parameters:
+      template: traditional-html-plus
+      reportDir: "${ZAP_REPORT_DIR}"
+      reportFile: zap-report-ica.html
+      reportTitle: "ZAP Security Scan — ICA Application"
+
+  - type: report
+    name: "XML Report"
+    parameters:
+      template: traditional-xml
+      reportDir: "${ZAP_REPORT_DIR}"
+      reportFile: zap-report-ica.xml
+      reportTitle: "ZAP Security Scan — ICA Application"
+
+  - type: report
+    name: "JSON Report"
+    parameters:
+      template: traditional-json
+      reportDir: "${ZAP_REPORT_DIR}"
+      reportFile: zap-report-ica.json
+      reportTitle: "ZAP Security Scan — ICA Application"
+YAML
+
+    log_success "Automation plan written: ${plan_file}"
+    ZAP_PLAN_FILE="${plan_file}"
+    export ZAP_PLAN_FILE
+}
+
+# =============================================================================
+# Step 4 — Run ZAP via the Automation Framework CLI
 # =============================================================================
 run_zap_scan() {
-    local scan_script="${SCRIPT_DIR}/zap-full-scan-authenticated.sh"
+    log_info "Starting ZAP Automation Framework scan..."
+    log_info "  Plan     : ${ZAP_PLAN_FILE}"
+    log_info "  ZAP      : ${ZAP_SH}"
 
-    if [[ ! -f "${scan_script}" ]]; then
-        log_error "Scan script not found: ${scan_script}"
-        return 1
-    fi
+    # ZAP writes its own logs to stdout; capture exit code separately
+    local zap_exit=0
+    "${ZAP_SH}" -cmd \
+        -autorun "${ZAP_PLAN_FILE}" \
+        -config api.disablekey=true \
+        2>&1 || zap_exit=$?
 
-    chmod +x "${scan_script}"
-    log_info "Executing: ${scan_script}"
-
-    if bash "${scan_script}"; then
-        log_success "ZAP scan completed successfully"
-        return 0
+    if [[ ${zap_exit} -ne 0 ]]; then
+        log_warning "ZAP exited with code ${zap_exit} (may indicate alerts found or scan error)"
     else
-        log_error "ZAP scan finished with security findings or errors"
-        return 1
+        log_success "ZAP scan completed (exit 0)"
     fi
+
+    return ${zap_exit}
 }
 
 # =============================================================================
-# Step 4 — Collect evidence for IBM Toolchain compliance
+# Step 5 — Parse JSON report and check against alert threshold
+# =============================================================================
+analyze_results() {
+    local json_report="${ZAP_REPORT_DIR}/zap-report-ica.json"
+
+    if [[ ! -f "${json_report}" ]]; then
+        log_error "JSON report not found: ${json_report}"
+        log_error "ZAP may have failed before generating reports — check output above."
+        return 1
+    fi
+
+    # ZAP JSON report root key is "site" array in traditional-json template
+    # Try both .site[].alerts[] (older) and .alerts[] (newer) structures
+    local high med low info
+    high="$(jq '[.. | objects | select(has("riskdesc")) | select(.riskdesc | startswith("High"))]   | length' "${json_report}" 2>/dev/null || echo 0)"
+    med="$( jq '[.. | objects | select(has("riskdesc")) | select(.riskdesc | startswith("Medium"))] | length' "${json_report}" 2>/dev/null || echo 0)"
+    low="$( jq '[.. | objects | select(has("riskdesc")) | select(.riskdesc | startswith("Low"))]    | length' "${json_report}" 2>/dev/null || echo 0)"
+    info="$(jq '[.. | objects | select(has("riskdesc")) | select(.riskdesc | startswith("Informational"))] | length' "${json_report}" 2>/dev/null || echo 0)"
+
+    log_info "Scan Results:"
+    log_info "  High          : ${high}"
+    log_info "  Medium        : ${med}"
+    log_info "  Low           : ${low}"
+    log_info "  Informational : ${info}"
+    log_info "  Threshold     : ${ZAP_ALERT_THRESHOLD}"
+
+    # Write machine-readable summary
+    cat > "${ZAP_REPORT_DIR}/zap-results-summary.json" <<EOF
+{
+  "scan_timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "target_url": "${ICA_APP_URL}",
+  "alert_threshold": "${ZAP_ALERT_THRESHOLD}",
+  "alerts": { "high": ${high}, "medium": ${med}, "low": ${low}, "informational": ${info} }
+}
+EOF
+
+    local fail=false
+    case "${ZAP_ALERT_THRESHOLD^^}" in
+        HIGH)         [[ ${high} -gt 0 ]]                          && fail=true ;;
+        MEDIUM)       [[ ${high} -gt 0 || ${med} -gt 0 ]]          && fail=true ;;
+        LOW)          [[ ${high} -gt 0 || ${med} -gt 0 || ${low} -gt 0 ]] && fail=true ;;
+        INFORMATIONAL)[[ ${high} -gt 0 || ${med} -gt 0 || ${low} -gt 0 || ${info} -gt 0 ]] && fail=true ;;
+    esac
+
+    if [[ "${fail}" == "true" ]]; then
+        log_error "FAIL: alerts found above ${ZAP_ALERT_THRESHOLD} threshold"
+        return 1
+    fi
+
+    log_success "PASS: no alerts above ${ZAP_ALERT_THRESHOLD} threshold"
+    return 0
+}
+
+# =============================================================================
+# Step 6 — Collect evidence for IBM Toolchain compliance locker
 # =============================================================================
 collect_evidence() {
     log_info "Collecting scan evidence..."
 
-    local evidence_script="${SCRIPT_DIR}/collect-zap-evidence.sh"
-    if [[ -f "${evidence_script}" ]]; then
-        chmod +x "${evidence_script}"
-        bash "${evidence_script}" || log_warning "Evidence collection returned non-zero"
-    else
-        # Minimal inline evidence collection when the dedicated script is absent
-        local evidence_type="${ZAP_EVIDENCE_TYPE:-com.ibm.dynamic_scan}"
-        local ts
-        ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    local html="${ZAP_REPORT_DIR}/zap-report-ica.html"
+    local summary="${ZAP_REPORT_DIR}/zap-results-summary.json"
 
-        # Find the newest JSON report (POSIX-compatible, no -printf)
-        local json_report=""
-        json_report="$(ls -t "${ZAP_REPORT_DIR}"/zap-report-*.json 2>/dev/null | head -1 || true)"
+    if [[ ! -f "${html}" ]]; then
+        log_warning "No HTML report found — evidence collection skipped"
+        return 0
+    fi
 
-        local html_report=""
-        html_report="$(ls -t "${ZAP_REPORT_DIR}"/zap-report-*.html 2>/dev/null | head -1 || true)"
+    log_success "Reports available in: ${ZAP_REPORT_DIR}"
+    ls -lh "${ZAP_REPORT_DIR}"/ 2>/dev/null || true
 
-        if [[ -z "${json_report}" ]]; then
-            log_warning "No scan reports found in ${ZAP_REPORT_DIR} — skipping evidence"
-            return 0
-        fi
+    # Save to IBM Toolchain evidence locker when running in Tekton
+    if command -v save_artifact &>/dev/null; then
+        save_artifact "zap-scan-report" \
+            "type=com.ibm.dynamic_scan" \
+            "path=${html}" \
+            || log_warning "save_artifact returned non-zero (non-fatal)"
 
-        local summary="${ZAP_REPORT_DIR}/evidence-summary.json"
-        cat > "${summary}" <<EOF
-{
-  "evidence_type": "${evidence_type}",
-  "scan_timestamp": "${ts}",
-  "target_url": "${ICA_APP_URL}",
-  "scan_type": "ZAP Full Scan - IBM SSO Authenticated",
-  "authentication_method": "IBM w3id SAML2 (script-based)",
-  "report_json": "$(basename "${json_report}")",
-  "report_html": "$(basename "${html_report:-}")"
-}
-EOF
-        log_success "Evidence summary written: ${summary}"
-
-        # Save to IBM Toolchain evidence locker if running inside a pipeline
-        if command -v save_artifact &> /dev/null && [[ -n "${html_report}" ]]; then
-            save_artifact "zap-scan-evidence" \
-                "type=${evidence_type}" \
-                "path=${html_report}" \
-                "summary=${summary}" \
-                || log_warning "save_artifact returned non-zero (non-fatal)"
+        if [[ -f "${summary}" ]]; then
+            save_artifact "zap-scan-summary" \
+                "type=com.ibm.dynamic_scan" \
+                "path=${summary}" \
+                || log_warning "save_artifact summary returned non-zero (non-fatal)"
         fi
     fi
 }
@@ -261,20 +392,21 @@ EOF
 main() {
     log_info "============================================================"
     log_info " ZAP Authenticated Scan for ICA Applications                "
-    log_info " IBM Cloud Toolchain Pipeline Integration                    "
+    log_info " IBM Cloud Toolchain — Classic Pipeline                     "
     log_info "============================================================"
 
     local exit_code=0
 
-    setup_environment   || { log_error "Environment setup failed"; exit 1; }
-    setup_zap_docker    || exit_code=$?
+    setup_environment       || { log_error "Environment setup failed"; exit 1; }
+    find_zap                || { log_error "ZAP not found"; exit 1; }
+    generate_automation_plan || { log_error "Failed to generate automation plan"; exit 1; }
+    run_zap_scan            || exit_code=$?
+    collect_evidence        || log_warning "Evidence collection failed (non-fatal)"
 
-    if [[ ${exit_code} -eq 0 ]]; then
-        run_zap_scan    || exit_code=$?
+    # Always analyse results — even if ZAP returned non-zero (may just mean alerts found)
+    if [[ -f "${ZAP_REPORT_DIR}/zap-report-ica.json" ]]; then
+        analyze_results || exit_code=1
     fi
-
-    # Always attempt evidence collection
-    collect_evidence    || log_warning "Evidence collection failed (non-fatal)"
 
     if [[ ${exit_code} -eq 0 ]]; then
         log_success "============================================================"
@@ -290,12 +422,7 @@ main() {
     return ${exit_code}
 }
 
-# Run main only when executed directly (not sourced)
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    main "$@"
-    exit $?
-else
-    main "$@"
-fi
+# Run main — whether called directly or via bash/source
+main "$@"
 
 # Made with Bob
