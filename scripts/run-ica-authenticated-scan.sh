@@ -119,9 +119,13 @@ setup_environment() {
         return 1
     fi
 
-    # Report directory — use pipeline workspace if available
-    export ZAP_REPORT_DIR="${ZAP_REPORT_DIR:-${WORKSPACE_DIR}/zap-reports}"
-    mkdir -p "${ZAP_REPORT_DIR}"
+    # Report directory.
+    # IMPORTANT: When running inside the ZAP Docker image (Custom Docker Image
+    # builder), the container runs as user 'zap' which can only write to /zap/wrk.
+    # ZAP also prepends /zap/ to any relative path in the automation plan.
+    # Use /zap/wrk as the canonical writable directory.
+    export ZAP_REPORT_DIR="${ZAP_REPORT_DIR:-/zap/wrk}"
+    mkdir -p "${ZAP_REPORT_DIR}" 2>/dev/null || true
 
     log_success "Environment setup complete"
     log_info "  Target URL       : ${ICA_APP_URL}"
@@ -364,11 +368,26 @@ collect_evidence() {
 
     if [[ ! -f "${html}" ]]; then
         log_warning "No HTML report found — evidence collection skipped"
+        log_info "Reports directory contents:"
+        ls -lh "${ZAP_REPORT_DIR}"/ 2>/dev/null || true
         return 0
     fi
 
     log_success "Reports available in: ${ZAP_REPORT_DIR}"
     ls -lh "${ZAP_REPORT_DIR}"/ 2>/dev/null || true
+
+    # Copy reports from /zap/wrk to the pipeline workspace so the Toolchain
+    # artifact uploader can find them outside the container filesystem.
+    if [[ "${ZAP_REPORT_DIR}" == /zap/wrk* ]] && [[ -d "${WORKSPACE_DIR}" ]]; then
+        local ws_reports="${WORKSPACE_DIR}/zap-reports"
+        mkdir -p "${ws_reports}"
+        cp -f "${ZAP_REPORT_DIR}"/zap-report-ica.* "${ws_reports}/" 2>/dev/null || true
+        [[ -f "${summary}" ]] && cp -f "${summary}" "${ws_reports}/" 2>/dev/null || true
+        log_info "Reports copied to workspace: ${ws_reports}"
+        # Point html/summary at copied paths for save_artifact
+        html="${ws_reports}/zap-report-ica.html"
+        summary="${ws_reports}/zap-results-summary.json"
+    fi
 
     # Save to IBM Toolchain evidence locker when running in Tekton
     if command -v save_artifact &>/dev/null; then
