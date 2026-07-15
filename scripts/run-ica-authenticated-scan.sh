@@ -197,8 +197,8 @@ env:
         - ".*logout.*"
         - ".*signout.*"
         - ".*sign-out.*"
-        - ".*\\.pdf\$"
-        - ".*\\.zip\$"
+        - ".*[.]pdf$"
+        - ".*[.]zip$"
       authentication:
         method: "script"
         parameters:
@@ -208,8 +208,8 @@ env:
           IBM_SSO_LOGIN_URL: "${IBM_SSO_LOGIN_URL:-https://w3id.sso.ibm.com/auth/sps/samlidp2/saml20}"
         verification:
           method: "response"
-          loggedInRegex: "\\\\QLogout\\\\E|\\\\Qlogout\\\\E|\\\\QSign Out\\\\E"
-          loggedOutRegex: "\\\\QLogin\\\\E|\\\\Qlogin\\\\E|\\\\Qw3id.sso.ibm.com\\\\E"
+          loggedInRegex: '\QLogout\E|\Qlogout\E|\QSign Out\E'
+          loggedOutRegex: '\QLogin\E|\Qlogin\E|\Qw3id.sso.ibm.com\E'
           pollFrequency: 60
           pollUnits: "requests"
       users:
