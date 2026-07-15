@@ -273,7 +273,7 @@ jobs:
       type: authentication
       engine: "ECMAScript : Graal.js"
       name: "IBM-SSO-Auth"
-      script: "${auth_script}"
+      scriptPath: "${auth_script}"
 
   - type: spider
     name: "Spider ICA Application"

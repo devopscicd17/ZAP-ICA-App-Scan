@@ -39,7 +39,8 @@ bash scripts/run-ica-authenticated-scan.sh
     type: authentication   # script category
     engine: "ECMAScript : Graal.js"   # see engine names below
     name: "IBM-SSO-Auth"              # logical name referenced in context
-    script: "/absolute/path/to/ibm-sso-auth.js"   # ← correct key is `script:`, NOT `fileName:`
+    scriptPath: "/absolute/path/to/ibm-sso-auth.js"   # ← confirmed key is `scriptPath:`
+    # NOT `script:` (unrecognised), NOT `fileName:` (old/wrong), NOT `inline:`
 ```
 
 ### Script engine names
