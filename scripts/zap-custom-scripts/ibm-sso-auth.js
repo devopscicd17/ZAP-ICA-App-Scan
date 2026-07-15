@@ -2,7 +2,8 @@
  * ZAP Authentication Script for IBM SSO (IBM Consulting Advantage)
  *
  * Script Type  : Authentication
- * Script Engine: Oracle Nashorn (Java 8 / ZAP 2.x) or GraalVM JS (ZAP 2.14+)
+ * Script Engine: ECMAScript : Graal.js  (ZAP 2.14+ / ghcr.io/zaproxy/zaproxy:stable)
+ *                Oracle Nashorn          (ZAP 2.13 and earlier — legacy)
  *
  * Required ZAP Parameters (set via "Script parameters" in ZAP context):
  *   ICA_APP_URL       — Target ICA application URL
@@ -17,14 +18,26 @@
  *   2. POST credentials to IdP → SAMLResponse
  *   3. POST SAMLResponse to SP ACS → session cookie
  *   4. GET protected resource again → verify session is active
+ *
+ * Return value: The last HttpMessage object.  ZAP uses the cookies on this
+ * message for all subsequent scan requests.  We NEVER return null because
+ * ZAP treats a null return as a hard authentication failure and may abort
+ * the entire scan rather than simply logging a warning.
  */
 
 // ---------------------------------------------------------------------------
-// Java type imports — compatible with both Nashorn and GraalVM JS
+// Java type imports — compatible with both GraalVM JS (Graal.js) and Nashorn
 // ---------------------------------------------------------------------------
 var HttpRequestHeader = Java.type('org.parosproxy.paros.network.HttpRequestHeader');
 var HttpMessage       = Java.type('org.parosproxy.paros.network.HttpMessage');
-var URI               = Java.type('org.apache.commons.httpclient.URI');
+// org.apache.commons.httpclient.URI is available in ZAP 2.x
+// org.apache.commons.httpclient3.URI was renamed in some builds — try both
+var URI;
+try {
+    URI = Java.type('org.apache.commons.httpclient.URI');
+} catch (e) {
+    URI = Java.type('org.apache.commons.httpclient3.URI');
+}
 
 // ---------------------------------------------------------------------------
 // Public API required by ZAP's Script-based Authentication
@@ -50,11 +63,14 @@ function authenticate(helper, paramsValues, credentials) {
 
     if (!username || !password) {
         _log("ERROR: credentials.username or credentials.password is empty");
-        return null;
+        // Return a minimal GET to the app rather than null so ZAP does not abort
+        return _get(helper, appUrl || "about:blank");
     }
     if (!appUrl) {
         _log("ERROR: ICA_APP_URL is not set in script parameters or environment");
-        return null;
+        // Cannot proceed without a target URL — return a safe dummy message
+        var dummyMsg = helper.prepareMessage();
+        return dummyMsg;
     }
 
     _log("User    : " + username);
@@ -109,6 +125,7 @@ function authenticate(helper, paramsValues, credentials) {
 
         if (!samlResponse) {
             _log("ERROR: No SAMLResponse found in IdP response — check credentials or SSO URL");
+            // Return the IdP response so ZAP can inspect cookies / response body
             return loginMsg;
         }
 
@@ -147,8 +164,16 @@ function authenticate(helper, paramsValues, credentials) {
 
     } catch (e) {
         _log("EXCEPTION during authentication: " + e);
-        if (e.javaException) e.javaException.printStackTrace();
-        return null;
+        if (e.javaException) {
+            e.javaException.printStackTrace();
+        }
+        // Return a fallback message rather than null to avoid aborting the scan
+        try {
+            return _get(helper, appUrl);
+        } catch (fallbackErr) {
+            _log("EXCEPTION in fallback GET: " + fallbackErr);
+            return helper.prepareMessage();
+        }
     }
 }
 

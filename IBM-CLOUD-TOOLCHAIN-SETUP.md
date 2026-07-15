@@ -218,72 +218,52 @@ git push origin main
 
 ### Option B: Manual Pipeline Configuration (Classic Pipeline)
 
-If not using `.pipeline-config.yaml`, configure stages manually:
+The **Classic Pipeline** approach uses a **Custom Docker Image** job that runs
+directly inside the ZAP container — **no Docker-in-Docker (`dind`) is needed**.
 
-#### Stage 1: Build (Optional)
+> **Key constraint:** The Classic Pipeline job runs inside `ghcr.io/zaproxy/zaproxy:stable`.
+> `zap.sh` is at `/zap/zap.sh`. The container runs as user `zap` which can only
+> write to `/zap/wrk`. The script handles all of this automatically.
+
+#### Stage 1: ZAP Security Scan
 
 1. Click **Add Stage**
+
 2. **Input tab:**
    - Input type: `Git Repository`
    - Select your repository
    - Branch: `main` (or your default branch)
 
-3. **Jobs tab:**
+3. **Environment Properties tab** — add these properties (underscores only — dashes silently return empty):
+
+   | Name | Type | Value / Description |
+   |------|------|---------------------|
+   | `opt_in_ica_scan` | Text | `true` — enables the scan; leave unset to skip |
+   | `app_url` | Text | Target ICA application URL, e.g. `https://your-app.ibm.com` |
+   | `ibm_sso_username` | Text | IBM w3id email address |
+   | `ibm_sso_password` | **Secure** | IBM w3id password (**must be Secure type**) |
+   | `zap_scan_timeout` | Text | *(optional)* Active scan timeout in minutes — default `60` |
+   | `zap_alert_threshold` | Text | *(optional)* `HIGH`, `MEDIUM`, or `LOW` — default `MEDIUM` |
+   | `zap_max_depth` | Text | *(optional)* Spider crawl depth — default `5` |
+
+4. **Jobs tab:**
    - Click **Add Job** → **Build**
-   - Builder type: `Shell Script`
-   - Script:
+   - **Builder type:** `Custom Docker Image`
+   - **Docker image:** `ghcr.io/zaproxy/zaproxy:stable`
+   - **Script:**
+
    ```bash
    #!/bin/bash
-   echo "Build completed"
+   set -e
+   bash scripts/run-ica-authenticated-scan.sh
    ```
 
-#### Stage 2: ZAP Security Scan
-
-1. Click **Add Stage**
-2. **Input tab:**
-   - Input type: `Build Artifacts`
-   - Stage: `Build` (from previous stage)
-
-3. **Jobs tab:**
-   - Click **Add Job** → **Deploy**
-   - Deployer type: `Shell Script`
-   - **IMPORTANT:** Enable Docker by adding to stage properties:
-     ```
-     dind: true
-     ```
-
-4. **Script:**
-   ```bash
-   #!/usr/bin/env bash
-   set -euo pipefail
-   
-   # Enable debug (optional)
-   if [[ "$PIPELINE_DEBUG" == 1 ]]; then
-     env | sort
-     set -x
-   fi
-   
-   # Get credentials from secure properties
-   export ICA_APP_URL="$APP_URL"
-   export IBM_SSO_USERNAME="$IBM_SSO_USERNAME"
-   export IBM_SSO_PASSWORD="$IBM_SSO_PASSWORD"
-   
-   # Optional configuration
-   export ZAP_SCAN_TIMEOUT="${ZAP_SCAN_TIMEOUT:-60}"
-   export ZAP_ALERT_THRESHOLD="${ZAP_ALERT_THRESHOLD:-MEDIUM}"
-   export ZAP_MAX_DEPTH="${ZAP_MAX_DEPTH:-5}"
-   
-   # Run ZAP scan
-   cd "$WORKSPACE"
-   source scripts/run-ica-authenticated-scan.sh
-   ```
-
-5. **Environment Properties:**
-   - Click **Environment properties** tab
-   - Add text properties:
-     - `APP_URL`: `${app_url}`
-     - `IBM_SSO_USERNAME`: `${ibm_sso_username}`
-     - `IBM_SSO_PASSWORD`: `${ibm_sso_password}`
+   That is the **entire** build script. The main script:
+   - Reads all credentials from the injected environment properties
+   - Generates the ZAP Automation Framework plan with credentials substituted in
+   - Calls `/zap/zap.sh -cmd -autorun` directly
+   - Parses the JSON report and fails the job if alerts exceed the threshold
+   - Copies reports to `$WORKSPACE/zap-reports` for artifact download
 
 ---
 
@@ -304,32 +284,38 @@ If not using `.pipeline-config.yaml`, configure stages manually:
 3. **Expected Output**
 
    ```
-   [INFO] Starting ZAP authenticated scan...
-   [INFO] Docker found: Docker version 20.10.x
-   [INFO] Starting ZAP Docker container...
-   [SUCCESS] ZAP container started: zap-scan-container
-   [INFO] Waiting for ZAP to be ready (this may take 1-2 minutes)...
-   [SUCCESS] ZAP daemon is ready and responding
-   [INFO] ZAP version: 2.14.0
-   [INFO] Loading IBM SSO authentication script...
-   [SUCCESS] Authentication script loaded
-   [INFO] Starting spider scan...
-   [INFO] Spider progress: 100%
-   [INFO] Starting active scan...
-   [INFO] Active scan progress: 100%
-   [SUCCESS] Reports generated in: ./zap-reports
-   [INFO] Scan Results Summary:
-     High Risk Alerts: 0
-     Medium Risk Alerts: 2
-     Low Risk Alerts: 5
-     Informational Alerts: 10
-   [SUCCESS] ZAP Authenticated Scan Completed Successfully
+   [INFO] ============================================================
+   [INFO]  ZAP Authenticated Scan for ICA Applications
+   [INFO]  IBM Cloud Toolchain — Classic Pipeline
+   [INFO] ============================================================
+   [INFO] Defaults loaded from: .../zap-custom-scripts/.env.ica-authenticated-scan.sh
+   [SUCCESS] Environment setup complete
+   [INFO]   Target URL       : https://your-app.ibm.com
+   [INFO]   SSO User         : user@ibm.com
+   [INFO]   Alert Threshold  : MEDIUM
+   [INFO]   Scan Timeout     : 60 min
+   [INFO]   Report Dir       : /zap/wrk
+   [SUCCESS] ZAP found: /zap/zap.sh
+   [SUCCESS] Automation plan written: /zap/wrk/automation-plan.yaml
+   [INFO] Starting ZAP Automation Framework scan...
+   ...ZAP Automation Framework log output...
+   [SUCCESS] ZAP scan completed (exit 0)
+   [INFO] Scan Results:
+   [INFO]   High          : 0
+   [INFO]   Medium        : 2
+   [INFO]   Low           : 5
+   [INFO]   Informational : 10
+   [INFO]   Threshold     : MEDIUM
+   [ERROR] FAIL: alerts found above MEDIUM threshold
    ```
 
+   The job exits non-zero when alerts exceed the threshold — this is the
+   expected and correct behaviour for a security gate.
+
 4. **View Reports**
-   - Reports are saved in the `zap-reports` directory
-   - Download artifacts from the pipeline run
-   - Reports include: HTML, XML, JSON, and Markdown formats
+   - Reports are written to `/zap/wrk` inside the container
+   - The script copies them to `$WORKSPACE/zap-reports` for artifact download
+   - Reports include: HTML, XML, and JSON formats
 
 ---
 

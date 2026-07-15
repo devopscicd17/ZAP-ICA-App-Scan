@@ -15,9 +15,11 @@
 #   ibm_sso_password   — IBM w3id password (use Secure type)
 #
 # Optional properties:
-#   zap_scan_timeout   — Active scan timeout in minutes (default: 60)
-#   zap_alert_threshold — HIGH | MEDIUM | LOW              (default: MEDIUM)
-#   zap_max_depth      — Spider crawl depth               (default: 5)
+#   zap_scan_timeout    — Active scan timeout in minutes    (default: 60)
+#   zap_alert_threshold — HIGH | MEDIUM | LOW               (default: MEDIUM)
+#   zap_max_depth       — Spider crawl depth                (default: 5)
+#   opt_in_ica_scan     — Must be set to any non-empty value to run the scan
+#                         (Classic Pipeline gate — skip silently if not set)
 #
 
 set -euo pipefail
@@ -39,6 +41,39 @@ log_error()   { echo -e "${RED}[ERROR]${NC}   $*" >&2; }
 # Directory containing this script (works whether called or sourced)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="${WORKSPACE:-$(pwd)}"
+
+# =============================================================================
+# Step 0 — Opt-in gate (Classic Pipeline)
+# =============================================================================
+check_opt_in() {
+    # In the Tekton/One-Pipeline path the gate is handled by .pipeline-config.yaml
+    # before this script is ever called.  Here we guard the Classic Pipeline path
+    # where the script is run directly from the Jobs tab build script.
+    #
+    # The gate is SKIPPED when:
+    #   - ICA_APP_URL is already exported by the caller (Tekton path — already gated)
+    #   - opt_in_ica_scan env var is non-empty (Classic Pipeline opted-in)
+    #
+    # This prevents accidental full DAST runs on misconfigured pipelines.
+    if [[ -n "${ICA_APP_URL:-}" ]]; then
+        # Already exported by a Tekton stage that already did the opt-in check
+        return 0
+    fi
+
+    local opt_in="${opt_in_ica_scan:-}"
+    if command -v get_env &>/dev/null; then
+        opt_in="${opt_in:-$(get_env opt_in_ica_scan "")}"
+    fi
+
+    if [[ -z "${opt_in}" ]]; then
+        log_info "============================================================"
+        log_info " ICA authenticated scan is NOT enabled — skipping."
+        log_info " To enable, add pipeline environment property:"
+        log_info "   opt_in_ica_scan = true"
+        log_info "============================================================"
+        exit 0
+    fi
+}
 
 # =============================================================================
 # Step 1 — Resolve and validate credentials
@@ -184,6 +219,11 @@ generate_automation_plan() {
     # ZAP reads ${VAR} substitution only in some fields — safest to write the
     # actual values directly into the plan file so nothing depends on ZAP's
     # variable substitution support.
+    # Resolve optional SSO login URL default before writing plan
+    local sso_url="${IBM_SSO_LOGIN_URL:-https://w3id.sso.ibm.com/auth/sps/samlidp2/saml20}"
+    # Spider runs for half the total timeout; active scan gets the full timeout
+    local spider_duration=$(( ZAP_SCAN_TIMEOUT / 2 ))
+
     cat > "${plan_file}" <<YAML
 ---
 env:
@@ -197,17 +237,19 @@ env:
         - ".*logout.*"
         - ".*signout.*"
         - ".*sign-out.*"
-        - ".*[.]pdf$"
-        - ".*[.]zip$"
+        - ".*[.]pdf\$"
+        - ".*[.]zip\$"
       authentication:
         method: "script"
         parameters:
           scriptName: "IBM-SSO-Auth"
-          scriptEngine: "Oracle Nashorn"
+          # ZAP 2.14+ (ghcr.io/zaproxy/zaproxy:stable) ships GraalVM JS not Nashorn
+          scriptEngine: "ECMAScript : Graal.js"
           ICA_APP_URL: "${ICA_APP_URL}"
-          IBM_SSO_LOGIN_URL: "${IBM_SSO_LOGIN_URL:-https://w3id.sso.ibm.com/auth/sps/samlidp2/saml20}"
+          IBM_SSO_LOGIN_URL: "${sso_url}"
         verification:
           method: "response"
+          # \Q...\E = Java Pattern.quote(); single-quoted YAML to avoid shell/YAML double-escape
           loggedInRegex: '\QLogout\E|\Qlogout\E|\QSign Out\E'
           loggedOutRegex: '\QLogin\E|\Qlogin\E|\Qw3id.sso.ibm.com\E'
           pollFrequency: 60
@@ -229,16 +271,16 @@ jobs:
     parameters:
       action: add
       type: authentication
-      engine: "Oracle Nashorn"
+      engine: "ECMAScript : Graal.js"
       name: "IBM-SSO-Auth"
-      fileName: "${auth_script}"
+      script: "${auth_script}"
 
   - type: spider
     name: "Spider ICA Application"
     parameters:
       context: ICA-App-Context
       user: IBMSSOUser
-      maxDuration: $(( ZAP_SCAN_TIMEOUT / 2 ))
+      maxDuration: ${spider_duration}
       maxDepth: ${ZAP_MAX_DEPTH}
       maxChildren: 0
       acceptCookies: true
@@ -254,7 +296,7 @@ jobs:
     parameters:
       context: ICA-App-Context
       user: IBMSSOUser
-      maxDuration: ${ZAP_SCAN_TIMEOUT}
+      maxScanDurationInMins: ${ZAP_SCAN_TIMEOUT}
       maxRuleDurationInMins: 5
       threadPerHost: 2
       handleAntiCSRFTokens: true
@@ -283,6 +325,8 @@ jobs:
       reportFile: zap-report-ica.json
       reportTitle: "ZAP Security Scan — ICA Application"
 YAML
+    # Restrict plan file permissions — it contains credentials in plaintext
+    chmod 600 "${plan_file}" 2>/dev/null || true
 
     log_success "Automation plan written: ${plan_file}"
     ZAP_PLAN_FILE="${plan_file}"
@@ -426,6 +470,7 @@ main() {
 
     local exit_code=0
 
+    check_opt_in            || true   # exits 0 silently if not opted in
     setup_environment       || { log_error "Environment setup failed"; exit 1; }
     find_zap                || { log_error "ZAP not found"; exit 1; }
     generate_automation_plan || { log_error "Failed to generate automation plan"; exit 1; }

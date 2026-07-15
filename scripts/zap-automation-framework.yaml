@@ -4,8 +4,14 @@
 # This file is used by ZAP's Automation Framework (ZAP 2.12+) as an ALTERNATIVE
 # to the API-call-based approach in zap-full-scan-authenticated.sh.
 #
-# Usage (run directly via Docker — no ZAP daemon needed):
+# Usage (run directly — no Docker daemon needed inside the ZAP container):
 #
+# Classic Pipeline job (Custom Docker Image: ghcr.io/zaproxy/zaproxy:stable):
+#   bash scripts/run-ica-authenticated-scan.sh
+#   (The main script generates a plan at runtime with credentials substituted in
+#    and calls /zap/zap.sh -cmd -autorun /zap/wrk/automation-plan.yaml)
+#
+# Local Docker run (for testing outside IBM Toolchain):
 #   docker run --rm \
 #     -v "$(pwd)/scripts/zap-custom-scripts:/zap/scripts:ro" \
 #     -v "$(pwd)/scripts:/zap/plan:ro" \
@@ -38,8 +44,8 @@ env:
         - ".*sign-out.*"
         - ".*download.*"
         - ".*export.*"
-        - ".*\\.pdf$"
-        - ".*\\.zip$"
+        - ".*[.]pdf$"
+        - ".*[.]zip$"
 
       # -----------------------------------------------------------------------
       # Authentication — script-based IBM w3id SAML2 SSO
@@ -48,13 +54,16 @@ env:
         method: "script"
         parameters:
           scriptName: "IBM-SSO-Auth"
-          scriptEngine: "Oracle Nashorn"
+          # ZAP 2.14+ (stable image) uses GraalVM JS — engine name is "ECMAScript : Graal.js"
+          # ZAP 2.13 and earlier used "Oracle Nashorn"
+          scriptEngine: "ECMAScript : Graal.js"
           ICA_APP_URL: "${ICA_APP_URL}"
           IBM_SSO_LOGIN_URL: "https://w3id.sso.ibm.com/auth/sps/samlidp2/saml20"
         verification:
           method: "response"
-          loggedInRegex: "\\QLogout\\E|\\Qlogout\\E|\\QSign Out\\E|\\Qsign-out\\E"
-          loggedOutRegex: "\\QLogin\\E|\\Qlogin\\E|\\QSign In\\E|\\Qw3id.sso.ibm.com\\E"
+          # \Q...\E is Java Pattern.quote() — treated as literal strings, not regex
+          loggedInRegex: '\QLogout\E|\Qlogout\E|\QSign Out\E'
+          loggedOutRegex: '\QLogin\E|\Qlogin\E|\Qw3id.sso.ibm.com\E'
           pollFrequency: 60
           pollUnits: "requests"
 
@@ -88,9 +97,11 @@ jobs:
     parameters:
       action: add
       type: authentication
-      engine: "Oracle Nashorn"
+      # ZAP 2.14+ (stable image) uses GraalVM JS — engine name is "ECMAScript : Graal.js"
+      engine: "ECMAScript : Graal.js"
       name: "IBM-SSO-Auth"
-      fileName: "/zap/scripts/ibm-sso-auth.js"
+      # When running inside the ZAP container mount /zap/scripts from repo's zap-custom-scripts dir
+      script: "/zap/scripts/ibm-sso-auth.js"
 
   # ---------------------------------------------------------------------------
   # 2. Traditional Spider (crawl as authenticated user)
@@ -151,9 +162,8 @@ jobs:
     parameters:
       context: ICA-App-Context
       user: IBMSSOUser
-      maxDuration: 60          # minutes — override via ZAP_SCAN_TIMEOUT env if invoking via shell
-      maxRuleDurationInMins: 5
       maxScanDurationInMins: 60
+      maxRuleDurationInMins: 5
       addQueryParam: false
       defaultPolicy: ""        # use ZAP default policy; set to "Custom-Policy" if custom XML provided
       delayInMs: 0
