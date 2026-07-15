@@ -44,12 +44,22 @@ WORKSPACE_DIR="${WORKSPACE:-$(pwd)}"
 # Step 1 — Resolve and validate credentials
 # =============================================================================
 setup_environment() {
-    # Load ZAP tuning defaults (${VAR:-default} so caller-exported vars win).
+    # Load ZAP tuning defaults. The .env file uses ${VAR:-default} so any
+    # variable already exported by the caller is preserved.
     local env_file="${SCRIPT_DIR}/zap-custom-scripts/.env.ica-authenticated-scan.sh"
     if [[ -f "${env_file}" ]]; then
         # shellcheck disable=SC1090
         source "${env_file}"
         log_info "Defaults loaded from: ${env_file}"
+    fi
+
+    # Override ZAP_REPORT_DIR to /zap/wrk when running inside the ZAP container.
+    # The .env default (./zap-reports) is a relative path that:
+    #   1. Fails with "Permission denied" (zap user can only write /zap/wrk)
+    #   2. Is resolved as /zap/./zap-reports by ZAP's autorun path handler
+    # We detect the ZAP container by checking for /zap/zap.sh.
+    if [[ -x "/zap/zap.sh" ]]; then
+        export ZAP_REPORT_DIR="/zap/wrk"
     fi
 
     # ------------------------------------------------------------------

@@ -35,7 +35,7 @@ export ZAP_MAX_DEPTH="${ZAP_MAX_DEPTH:-5}"
 export ZAP_THREAD_COUNT="${ZAP_THREAD_COUNT:-5}"
 export ZAP_SCAN_TIMEOUT="${ZAP_SCAN_TIMEOUT:-60}"
 export ZAP_ALERT_THRESHOLD="${ZAP_ALERT_THRESHOLD:-MEDIUM}"
-export ZAP_REPORT_DIR="${ZAP_REPORT_DIR:-./zap-reports}"
+export ZAP_REPORT_DIR="${ZAP_REPORT_DIR:-/zap/wrk}"
 
 # =============================================================================
 # ZAP Filter Options
