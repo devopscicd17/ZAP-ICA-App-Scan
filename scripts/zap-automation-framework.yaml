@@ -53,8 +53,9 @@ env:
       authentication:
         method: "script"
         parameters:
-          # "script" = the logical name of the already-registered script (registered by the script job)
-          script: "IBM-SSO-Auth"
+          # "script" = absolute path to the auth script file on disk
+          # ZAP resolves relative paths under /zap/wrk — always use absolute path
+          script: "/zap/scripts/ibm-sso-auth.js"
           # ZAP 2.14+ (stable image) uses GraalVM JS — engine name is "ECMAScript : Graal.js"
           # ZAP 2.13 and earlier used "Oracle Nashorn"
           scriptEngine: "ECMAScript : Graal.js"
@@ -88,25 +89,13 @@ env:
 # =============================================================================
 # Jobs — ordered list of scan tasks
 # =============================================================================
+# Note: No separate "script" job needed to pre-load the auth script.
+# The context authentication.parameters.script (file path) causes ZAP to load
+# and register the script automatically at context-validation time (before jobs run).
 jobs:
 
   # ---------------------------------------------------------------------------
-  # 1. Load the IBM SSO authentication script from the mounted volume
-  # ---------------------------------------------------------------------------
-  - type: script
-    name: Load IBM SSO Auth Script
-    parameters:
-      action: add
-      type: authentication
-      # ZAP 2.14+ (stable image) uses GraalVM JS — engine name is "ECMAScript : Graal.js"
-      engine: "ECMAScript : Graal.js"
-      name: "IBM-SSO-Auth"
-      # When running inside the ZAP container mount /zap/scripts from repo's zap-custom-scripts dir
-      # Confirmed param name: source (not script, not scriptPath, not fileName)
-      source: "/zap/scripts/ibm-sso-auth.js"
-
-  # ---------------------------------------------------------------------------
-  # 2. Traditional Spider (crawl as authenticated user)
+  # 1. Traditional Spider (crawl as authenticated user)
   # ---------------------------------------------------------------------------
   - type: spider
     name: Spider ICA Application

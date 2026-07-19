@@ -242,8 +242,9 @@ env:
       authentication:
         method: "script"
         parameters:
-          # "script" = the logical name of the already-loaded script (registered by the script job above)
-          script: "IBM-SSO-Auth"
+          # "script" = absolute path to the auth script file
+          # ZAP resolves this relative to /zap/wrk if not absolute — must use absolute path
+          script: "${auth_script}"
           # ZAP 2.14+ (ghcr.io/zaproxy/zaproxy:stable) ships GraalVM JS not Nashorn
           scriptEngine: "ECMAScript : Graal.js"
           ICA_APP_URL: "${ICA_APP_URL}"
@@ -266,15 +267,6 @@ env:
     progressToStdout: true
 
 jobs:
-
-  - type: script
-    name: "Load IBM SSO Auth Script"
-    parameters:
-      action: add
-      type: authentication
-      engine: "ECMAScript : Graal.js"
-      name: "IBM-SSO-Auth"
-      source: "${auth_script}"
 
   - type: spider
     name: "Spider ICA Application"

@@ -31,26 +31,32 @@ bash scripts/run-ica-authenticated-scan.sh
 
 ## ZAP Automation Framework schema facts (do not guess — these are verified)
 
-### `script` job parameters (confirmed from live ZAP run)
+### `script` job parameters (confirmed from live ZAP runs)
 ```yaml
 - type: script
   parameters:
     action: add            # "add" to load a new script
     type: authentication   # script category
     engine: "ECMAScript : Graal.js"   # see engine names below
-    name: "IBM-SSO-Auth"              # logical name referenced in context
+    name: "IBM-SSO-Auth"              # logical name
     source: "/absolute/path/to/ibm-sso-auth.js"   # ← confirmed key is `source:`
-    # NOT `script:` (unrecognised), NOT `scriptPath:` (unrecognised), NOT `fileName:` (old/wrong)
+    # NOT `script:`, NOT `scriptPath:`, NOT `fileName:`
 ```
+**However: this job is NOT needed.** The context `authentication.parameters.script` (file path)
+causes ZAP to load and register the script automatically at context-validation time, before any
+job runs. Adding a separate `script` job causes double-loading and potential conflicts.
 
-### Context authentication parameters (confirmed from live ZAP run)
+### Context authentication parameters (confirmed from live ZAP runs)
 When `authentication.method: script`, the `parameters` block must contain:
 ```yaml
 parameters:
-  script: "IBM-SSO-Auth"   # ← the LOGICAL NAME of the already-registered script (not a file path)
-  # NOT `scriptName:` (unrecognised) — the key must be `script:`
+  script: "/absolute/path/to/ibm-sso-auth.js"   # ← FILE PATH (not a logical name)
+  # ZAP resolves relative paths under /zap/wrk — MUST use absolute path
+  # NOT `scriptName:` (unrecognised)
+  # "script: IBM-SSO-Auth" is WRONG — ZAP tries to open /zap/wrk/IBM-SSO-Auth as a file
 ```
-ZAP error text `Neither 'scriptInline' nor 'script' specified` literally names these two fields.
+ZAP validates the `script` field as a readable file path at plan-load time (before jobs run).
+The error text `Neither 'scriptInline' nor 'script' specified` names the two valid field options.
 
 ### Script engine names
 - **ZAP 2.14+ (`ghcr.io/zaproxy/zaproxy:stable`)**: `"ECMAScript : Graal.js"` — GraalVM JS replaces Nashorn.
