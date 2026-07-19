@@ -242,7 +242,8 @@ env:
       authentication:
         method: "script"
         parameters:
-          scriptName: "IBM-SSO-Auth"
+          # "script" = the logical name of the already-loaded script (registered by the script job above)
+          script: "IBM-SSO-Auth"
           # ZAP 2.14+ (ghcr.io/zaproxy/zaproxy:stable) ships GraalVM JS not Nashorn
           scriptEngine: "ECMAScript : Graal.js"
           ICA_APP_URL: "${ICA_APP_URL}"
@@ -273,7 +274,7 @@ jobs:
       type: authentication
       engine: "ECMAScript : Graal.js"
       name: "IBM-SSO-Auth"
-      scriptPath: "${auth_script}"
+      source: "${auth_script}"
 
   - type: spider
     name: "Spider ICA Application"

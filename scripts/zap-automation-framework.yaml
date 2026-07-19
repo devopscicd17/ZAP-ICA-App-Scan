@@ -53,7 +53,8 @@ env:
       authentication:
         method: "script"
         parameters:
-          scriptName: "IBM-SSO-Auth"
+          # "script" = the logical name of the already-registered script (registered by the script job)
+          script: "IBM-SSO-Auth"
           # ZAP 2.14+ (stable image) uses GraalVM JS — engine name is "ECMAScript : Graal.js"
           # ZAP 2.13 and earlier used "Oracle Nashorn"
           scriptEngine: "ECMAScript : Graal.js"
@@ -101,8 +102,8 @@ jobs:
       engine: "ECMAScript : Graal.js"
       name: "IBM-SSO-Auth"
       # When running inside the ZAP container mount /zap/scripts from repo's zap-custom-scripts dir
-      # Confirmed param name: scriptPath (not script, not fileName)
-      scriptPath: "/zap/scripts/ibm-sso-auth.js"
+      # Confirmed param name: source (not script, not scriptPath, not fileName)
+      source: "/zap/scripts/ibm-sso-auth.js"
 
   # ---------------------------------------------------------------------------
   # 2. Traditional Spider (crawl as authenticated user)

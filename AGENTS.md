@@ -31,7 +31,7 @@ bash scripts/run-ica-authenticated-scan.sh
 
 ## ZAP Automation Framework schema facts (do not guess — these are verified)
 
-### `script` job parameters
+### `script` job parameters (confirmed from live ZAP run)
 ```yaml
 - type: script
   parameters:
@@ -39,9 +39,18 @@ bash scripts/run-ica-authenticated-scan.sh
     type: authentication   # script category
     engine: "ECMAScript : Graal.js"   # see engine names below
     name: "IBM-SSO-Auth"              # logical name referenced in context
-    scriptPath: "/absolute/path/to/ibm-sso-auth.js"   # ← confirmed key is `scriptPath:`
-    # NOT `script:` (unrecognised), NOT `fileName:` (old/wrong), NOT `inline:`
+    source: "/absolute/path/to/ibm-sso-auth.js"   # ← confirmed key is `source:`
+    # NOT `script:` (unrecognised), NOT `scriptPath:` (unrecognised), NOT `fileName:` (old/wrong)
 ```
+
+### Context authentication parameters (confirmed from live ZAP run)
+When `authentication.method: script`, the `parameters` block must contain:
+```yaml
+parameters:
+  script: "IBM-SSO-Auth"   # ← the LOGICAL NAME of the already-registered script (not a file path)
+  # NOT `scriptName:` (unrecognised) — the key must be `script:`
+```
+ZAP error text `Neither 'scriptInline' nor 'script' specified` literally names these two fields.
 
 ### Script engine names
 - **ZAP 2.14+ (`ghcr.io/zaproxy/zaproxy:stable`)**: `"ECMAScript : Graal.js"` — GraalVM JS replaces Nashorn.
