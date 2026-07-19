@@ -423,17 +423,21 @@ collect_evidence() {
     log_success "Reports available in: ${ZAP_REPORT_DIR}"
     ls -lh "${ZAP_REPORT_DIR}"/ 2>/dev/null || true
 
-    # Copy reports from /zap/wrk to the pipeline workspace so the Toolchain
-    # artifact uploader can find them outside the container filesystem.
+    # Attempt to copy reports from /zap/wrk to the pipeline workspace so the Toolchain
+    # artifact uploader can find them.  In Classic Pipeline Custom Docker Image the workspace
+    # is mounted read-only for the zap user — silently skip if mkdir fails.
     if [[ "${ZAP_REPORT_DIR}" == /zap/wrk* ]] && [[ -d "${WORKSPACE_DIR}" ]]; then
         local ws_reports="${WORKSPACE_DIR}/zap-reports"
-        mkdir -p "${ws_reports}"
-        cp -f "${ZAP_REPORT_DIR}"/zap-report-ica.* "${ws_reports}/" 2>/dev/null || true
-        [[ -f "${summary}" ]] && cp -f "${summary}" "${ws_reports}/" 2>/dev/null || true
-        log_info "Reports copied to workspace: ${ws_reports}"
-        # Point html/summary at copied paths for save_artifact
-        html="${ws_reports}/zap-report-ica.html"
-        summary="${ws_reports}/zap-results-summary.json"
+        if mkdir -p "${ws_reports}" 2>/dev/null; then
+            cp -f "${ZAP_REPORT_DIR}"/zap-report-ica.* "${ws_reports}/" 2>/dev/null || true
+            [[ -f "${summary}" ]] && cp -f "${summary}" "${ws_reports}/" 2>/dev/null || true
+            log_info "Reports copied to workspace: ${ws_reports}"
+            # Point html/summary at copied paths for save_artifact
+            html="${ws_reports}/zap-report-ica.html"
+            summary="${ws_reports}/zap-results-summary.json"
+        else
+            log_info "Workspace not writable — reports remain in: ${ZAP_REPORT_DIR}"
+        fi
     fi
 
     # Save to IBM Toolchain evidence locker when running in Tekton

@@ -26,6 +26,7 @@ bash scripts/run-ica-authenticated-scan.sh
 - The `zap` user can only write to `/zap/wrk` — `mkdir ./zap-reports` fails with permission denied.
 - ZAP prepends `/zap/` to any relative path in the automation plan — `./zap-reports/plan.yaml` becomes `/zap/./zap-reports/plan.yaml` (not found). Always use absolute path `/zap/wrk` for `ZAP_REPORT_DIR`.
 - The generated plan is written to `/zap/wrk/automation-plan.yaml` (chmod 600 — it contains credentials).
+- The **workspace directory** (`/workspace/<uuid>/`) is also **read-only** for the `zap` user — `mkdir` inside it fails with "Permission denied". Use `mkdir -p ... 2>/dev/null` with an `if` guard and silently skip the copy if it fails.
 
 ---
 
@@ -132,6 +133,14 @@ The error text `Neither 'scriptInline' nor 'script' specified` names the two val
    - `run_zap_scan()` — calls `/zap/zap.sh -cmd -autorun /zap/wrk/automation-plan.yaml`
    - `collect_evidence()` — copies reports to `$WORKSPACE/zap-reports`
    - `analyze_results()` — parses JSON report, fails on threshold breach
+
+---
+
+## `ibm-sso-auth.js` — critical implementation rules
+
+- `helper.prepareMessage()` returns a message with a **null HTTP version field**. Always call `setVersion(HttpRequestHeader.HTTP11)` **before** `setMethod()` or `setURI()` — ZAP calls `version.toUpperCase()` inside those setters and will NPE if version is null.
+- Never `return helper.prepareMessage()` as a fallback — the null version causes NPE downstream. Always perform a real `_get()` call or set version/method explicitly before returning.
+- The script runs successfully once `setVersion` is called first; authentication proceeds through the SAML2 flow.
 
 ---
 

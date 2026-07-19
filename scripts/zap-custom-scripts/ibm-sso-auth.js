@@ -64,13 +64,13 @@ function authenticate(helper, paramsValues, credentials) {
     if (!username || !password) {
         _log("ERROR: credentials.username or credentials.password is empty");
         // Return a minimal GET to the app rather than null so ZAP does not abort
-        return _get(helper, appUrl || "about:blank");
+        return _get(helper, appUrl);
     }
     if (!appUrl) {
         _log("ERROR: ICA_APP_URL is not set in script parameters or environment");
-        // Cannot proceed without a target URL — return a safe dummy message
-        var dummyMsg = helper.prepareMessage();
-        return dummyMsg;
+        // Cannot proceed without a target URL — perform a no-op GET to a known-good URL
+        // Never return a bare prepareMessage() — the HTTP version field is null which causes NPE
+        return _get(helper, "https://www.ibm.com/");
     }
 
     _log("User    : " + username);
@@ -167,12 +167,17 @@ function authenticate(helper, paramsValues, credentials) {
         if (e.javaException) {
             e.javaException.printStackTrace();
         }
-        // Return a fallback message rather than null to avoid aborting the scan
+        // Return a fallback GET to the app URL — never return a bare prepareMessage() since
+        // the HTTP version field is null on a freshly prepared message which causes NPE in ZAP
         try {
             return _get(helper, appUrl);
         } catch (fallbackErr) {
             _log("EXCEPTION in fallback GET: " + fallbackErr);
-            return helper.prepareMessage();
+            // Last resort: set the HTTP version so ZAP does not NPE on the version field
+            var lastResort = helper.prepareMessage();
+            lastResort.getRequestHeader().setVersion(HttpRequestHeader.HTTP11);
+            lastResort.getRequestHeader().setMethod(HttpRequestHeader.GET);
+            return lastResort;
         }
     }
 }
@@ -204,9 +209,11 @@ function getCredentialsParamsNames() {
 
 function _get(helper, url) {
     var msg = helper.prepareMessage();
+    // setVersion MUST come before setMethod/setURI — version is null on a fresh message
+    // and ZAP calls version.toUpperCase() inside those setters, causing NPE
+    msg.getRequestHeader().setVersion(HttpRequestHeader.HTTP11);
     msg.getRequestHeader().setMethod(HttpRequestHeader.GET);
     msg.getRequestHeader().setURI(new URI(url, true));
-    msg.getRequestHeader().setVersion(HttpRequestHeader.HTTP11);
     msg.setRequestBody("");
     msg.getRequestHeader().setContentLength(0);
     helper.sendAndReceive(msg, false);
@@ -215,9 +222,10 @@ function _get(helper, url) {
 
 function _post(helper, url, bodyStr) {
     var msg = helper.prepareMessage();
+    // setVersion MUST come before setMethod/setURI — see _get() comment above
+    msg.getRequestHeader().setVersion(HttpRequestHeader.HTTP11);
     msg.getRequestHeader().setMethod(HttpRequestHeader.POST);
     msg.getRequestHeader().setURI(new URI(url, true));
-    msg.getRequestHeader().setVersion(HttpRequestHeader.HTTP11);
     msg.getRequestHeader().setHeader("Content-Type", "application/x-www-form-urlencoded");
     msg.setRequestBody(bodyStr);
     msg.getRequestHeader().setContentLength(msg.getRequestBody().length());
