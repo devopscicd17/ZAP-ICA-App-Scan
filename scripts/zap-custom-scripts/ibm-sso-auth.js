@@ -57,10 +57,16 @@ function authenticate(helper, paramsValues, credentials) {
 
     var username    = credentials.getParam("username");
     var password    = credentials.getParam("password");
-    // Decode HTML entities — IBM Toolchain web UI stores property values HTML-encoded
-    var appUrl      = _htmlDecode(_param(paramsValues, "ICA_APP_URL"));
-    var ssoLoginUrl = _param(paramsValues, "IBM_SSO_LOGIN_URL")
-                      || java.lang.System.getenv("IBM_SSO_LOGIN_URL")
+
+    // Read appUrl from the OS environment variable — ZAP re-encodes & to &amp; when it
+    // stores YAML script parameters in paramsValues, so paramsValues.get("ICA_APP_URL")
+    // returns a double-encoded URL even after _htmlDecode.  The shell script exports
+    // ICA_APP_URL with the decoded value, which Java inherits untouched.
+    var appUrl = java.lang.System.getenv("ICA_APP_URL")
+              || _htmlDecode(_param(paramsValues, "ICA_APP_URL"));
+
+    var ssoLoginUrl = java.lang.System.getenv("IBM_SSO_LOGIN_URL")
+                      || _htmlDecode(_param(paramsValues, "IBM_SSO_LOGIN_URL"))
                       || "https://w3id.sso.ibm.com/auth/sps/samlidp2/saml20";
 
     if (!username || !password) {
@@ -211,7 +217,10 @@ function getCredentialsParamsNames() {
  * or internal method can read version.
  */
 function _buildMsg(method, url) {
-    var uri    = new URI(url, true);
+    // Decode any residual HTML entities before passing to URI parser.
+    // ZAP's URI class cannot handle &amp; literally — it must be & in the query string.
+    var cleanUrl = _htmlDecode(String(url));
+    var uri    = new URI(cleanUrl, false);  // false = url is NOT pre-escaped; let URI parse it
     var header = new HttpRequestHeader(method, uri, HttpRequestHeader.HTTP11);
     return new HttpMessage(header);
 }

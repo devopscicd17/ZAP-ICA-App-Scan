@@ -139,9 +139,10 @@ The error text `Neither 'scriptInline' nor 'script' specified` names the two val
 
 ## `ibm-sso-auth.js` — critical implementation rules
 
-- **Root cause of NPE**: `HttpRequestHeader.setMethod()` and `setURI()` call `this.version.toUpperCase()` internally. `helper.prepareMessage()` returns a message with `version = null`. All setter chains NPE.
-- **Fix**: Use the 3-arg constructor `new HttpRequestHeader(method, uri, version)` to build the request header atomically, then `new HttpMessage(header)`. This bypasses all setter NPE paths. See `_buildMsg()` in `ibm-sso-auth.js`.
+- **Root cause of NPE**: `HttpRequestHeader.setMethod()` and `setURI()` call `this.version.toUpperCase()` internally. `helper.prepareMessage()` returns a message with `version = null`. All setter chains NPE. Even `setVersion()` NPEs because it normalises the existing value first.
+- **Fix**: Use the 3-arg constructor `new HttpRequestHeader(method, uri, version)` → `new HttpMessage(header)`. Implemented in `_buildMsg()`. Always call `_htmlDecode(String(url))` on the URL before passing to `new URI()` — `&amp;` in a URL causes URI parsing to return null which propagates as NPE.
 - **Never use `helper.prepareMessage()`** followed by setters — always use `_buildMsg()` instead.
+- **ZAP double-encodes script parameter values**: `paramsValues.get("ICA_APP_URL")` returns `&amp;` even when the YAML has `&`. Always read `ICA_APP_URL` from `java.lang.System.getenv("ICA_APP_URL")` first — the OS env var holds the clean shell-decoded value.
 - Wrap all `sendAndReceive` calls in try/catch — ZAP's internal response parser also calls `version.toUpperCase()` on the response header, which can NPE for 302 redirect responses.
 - Use safe helpers `_body(msg)` and `_status(msg)` — `getResponseBody()` and `getResponseHeader()` can be null if `sendAndReceive` threw.
 - For Step 1 (app immediately 302s to IBM SSO), use `sendAndReceive(msg, true)` (follow redirects).
