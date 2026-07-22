@@ -3,36 +3,33 @@
  *
  * Script Type  : Authentication
  * Script Engine: ECMAScript : Graal.js  (ZAP 2.14+ / ghcr.io/zaproxy/zaproxy:stable)
- *                Oracle Nashorn          (ZAP 2.13 and earlier — legacy)
  *
- * Required ZAP Parameters (set via "Script parameters" in ZAP context):
+ * Supports two IBM SSO flows:
+ *   A. IBM Cloud OIDC / MTFIM  (prepiam.ice.ibmcloud.com) — used by IKS/ROKS-hosted apps
+ *   B. IBM w3id SAML2 POST     (w3id.sso.ibm.com)         — used by legacy w3id apps
+ *
+ * The script auto-detects which flow the app is using by inspecting the initial response.
+ *
+ * Required ZAP Parameters (authentication.parameters in automation plan):
  *   ICA_APP_URL       — Target ICA application URL
- *   IBM_SSO_LOGIN_URL — IBM SSO IdP endpoint (optional, falls back to env/default)
+ *   IBM_SSO_LOGIN_URL — (optional) Override IdP endpoint
  *
- * Required User Credentials (set via "Users" in ZAP context):
- *   username          — IBM w3id email address
- *   password          — IBM w3id password
+ * Required User Credentials:
+ *   username          — IBM w3id / IBMid email address
+ *   password          — IBM w3id / IBMid password
  *
- * The script follows the IBM w3id SAML2 POST-binding flow:
- *   1. GET protected resource → IdP redirect with SAMLRequest
- *   2. POST credentials to IdP → SAMLResponse
- *   3. POST SAMLResponse to SP ACS → session cookie
- *   4. GET protected resource again → verify session is active
- *
- * Return value: The last HttpMessage object.  ZAP uses the cookies on this
- * message for all subsequent scan requests.  We NEVER return null because
- * ZAP treats a null return as a hard authentication failure and may abort
- * the entire scan rather than simply logging a warning.
+ * CRITICAL GraalVM JS notes:
+ *   - Never use HttpRequestHeader.GET/POST/HTTP11 (Java static String constants) —
+ *     GraalVM's toUpperCase() NPEs on them. Use plain JS string literals "GET"/"POST"/"HTTP/1.1".
+ *   - Always _buildMsg(method, url) — never helper.prepareMessage() + setters.
+ *   - ZAP re-encodes & to &amp; in paramsValues — read ICA_APP_URL from System.getenv().
  */
 
 // ---------------------------------------------------------------------------
-// Java type imports — compatible with both GraalVM JS (Graal.js) and Nashorn
+// Java type imports
 // ---------------------------------------------------------------------------
-var HttpRequestHeader = Java.type('org.parosproxy.paros.network.HttpRequestHeader');
-var HttpMessage       = Java.type('org.parosproxy.paros.network.HttpMessage');
-var HttpResponseHeader = Java.type('org.parosproxy.paros.network.HttpResponseHeader');
-// org.apache.commons.httpclient.URI is available in ZAP 2.x
-// org.apache.commons.httpclient3.URI was renamed in some builds — try both
+var HttpRequestHeader  = Java.type('org.parosproxy.paros.network.HttpRequestHeader');
+var HttpMessage        = Java.type('org.parosproxy.paros.network.HttpMessage');
 var URI;
 try {
     URI = Java.type('org.apache.commons.httpclient.URI');
@@ -44,190 +41,254 @@ try {
 // Public API required by ZAP's Script-based Authentication
 // ---------------------------------------------------------------------------
 
-/**
- * Called by ZAP to perform authentication.
- *
- * @param {object} helper        — ZAP HttpSender helper
- * @param {Map}    paramsValues  — Script parameters from ZAP context
- * @param {object} credentials   — Credentials object for the current user
- * @returns {HttpMessage}        — The last HTTP message (ZAP inspects cookies)
- */
 function authenticate(helper, paramsValues, credentials) {
     _log("=== IBM SSO Authentication START ===");
 
-    var username    = credentials.getParam("username");
-    var password    = credentials.getParam("password");
+    var username = credentials.getParam("username");
+    var password = credentials.getParam("password");
 
-    // Read appUrl from the OS environment variable — ZAP re-encodes & to &amp; when it
-    // stores YAML script parameters in paramsValues, so paramsValues.get("ICA_APP_URL")
-    // returns a double-encoded URL even after _htmlDecode.  The shell script exports
-    // ICA_APP_URL with the decoded value, which Java inherits untouched.
+    // Read appUrl from OS env — ZAP re-encodes & to &amp; in paramsValues
     var appUrl = java.lang.System.getenv("ICA_APP_URL")
               || _htmlDecode(_param(paramsValues, "ICA_APP_URL"));
 
     var ssoLoginUrl = java.lang.System.getenv("IBM_SSO_LOGIN_URL")
-                      || _htmlDecode(_param(paramsValues, "IBM_SSO_LOGIN_URL"))
-                      || "https://w3id.sso.ibm.com/auth/sps/samlidp2/saml20";
+                   || _htmlDecode(_param(paramsValues, "IBM_SSO_LOGIN_URL"))
+                   || "https://w3id.sso.ibm.com/auth/sps/samlidp2/saml20";
 
     if (!username || !password) {
-        _log("ERROR: credentials.username or credentials.password is empty");
-        // Return a minimal GET to the app rather than null so ZAP does not abort
-        return _get(helper, appUrl);
+        _log("ERROR: username or password is empty");
+        return _get(helper, appUrl || "https://www.ibm.com/");
     }
     if (!appUrl) {
-        _log("ERROR: ICA_APP_URL is not set in script parameters or environment");
-        // Cannot proceed without a target URL — perform a no-op GET to a known-good URL
-        // Never return a bare prepareMessage() — the HTTP version field is null which causes NPE
+        _log("ERROR: ICA_APP_URL is not set");
         return _get(helper, "https://www.ibm.com/");
     }
 
     _log("User    : " + username);
-    _log("App URL : " + appUrl);   // should show literal & not &amp;
+    _log("App URL : " + appUrl);
     _log("SSO URL : " + ssoLoginUrl);
 
     try {
         // ------------------------------------------------------------------
-        // Step 1 — Access protected resource to trigger SP-initiated SSO
-        // Follow redirects so ZAP handles the 302→SSO chain automatically
-        // and we land on the IdP login page containing the SAMLRequest form.
+        // Step 1 — Fetch the app to discover which SSO flow it uses
         // ------------------------------------------------------------------
-        _log("Step 1: Accessing protected resource to get SAMLRequest...");
+        _log("Step 1: Fetching app to detect SSO flow...");
         var initMsg  = _getFollowRedirects(helper, appUrl);
         var initBody = _body(initMsg);
-        _log("Initial HTTP status: " + _status(initMsg));
+        var initStat = _status(initMsg);
+        var finalUrl = _finalUrl(initMsg, appUrl);
+        _log("Initial HTTP status: " + initStat + "  Final URL: " + finalUrl);
 
+        // ------------------------------------------------------------------
+        // Detect SSO flow from response content and final URL
+        // ------------------------------------------------------------------
+        _log("Body snippet (first 500): " + initBody.substring(0, 500));
+
+        // Flow A: IBM Cloud OIDC / MTFIM (prepiam.ice.ibmcloud.com or iam.cloud.ibm.com)
+        // The app may HTTP-redirect to prepiam, OR return 200 with a JS redirect.
+        var jsRedirectUrl = _extractJsRedirect(initBody);
+        _log("JS redirect URL found: " + (jsRedirectUrl || "none"));
+
+        if (finalUrl.indexOf("prepiam.ice.ibmcloud.com") >= 0
+                || finalUrl.indexOf("iam.cloud.ibm.com") >= 0
+                || finalUrl.indexOf("prepiam.") >= 0
+                || initBody.indexOf("prepiam.ice.ibmcloud.com") >= 0
+                || initBody.indexOf("IBMid") >= 0
+                || initBody.indexOf("ibm-login") >= 0
+                || (jsRedirectUrl && jsRedirectUrl.indexOf("prepiam") >= 0)
+                || (jsRedirectUrl && jsRedirectUrl.indexOf("ibmcloud.com") >= 0)) {
+            _log("Detected IBM Cloud OIDC flow (prepiam/IBMid)");
+            // Pass the JS redirect URL so _authenticateOIDC can fetch the actual login page
+            var oidcStartUrl = (jsRedirectUrl && jsRedirectUrl.match(/^https?:\/\//))
+                             ? jsRedirectUrl : finalUrl;
+            return _authenticateOIDC(helper, username, password, initMsg, initBody, oidcStartUrl, appUrl);
+        }
+
+        // Flow B: w3id SAML2 POST (SAMLRequest hidden field)
         var samlRequest = _extractHiddenField(initBody, "SAMLRequest");
-        var relayState  = _extractHiddenField(initBody, "RelayState");
-        var idpAction   = _extractFormAction(initBody) || ssoLoginUrl;
-
-        if (!samlRequest) {
-            _log("WARNING: SAMLRequest not found in initial response — app may not require SSO");
+        if (samlRequest) {
+            _log("Detected SAML2 POST flow (SAMLRequest found)");
+            return _authenticateSAML(helper, username, password, initMsg, initBody, ssoLoginUrl, appUrl);
         }
 
-        // ------------------------------------------------------------------
-        // Step 2 — POST credentials to IBM SSO IdP
-        // ------------------------------------------------------------------
-        _log("Step 2: Posting credentials to IBM SSO IdP...");
-        var loginBody = "username=" + _encode(username)
-                      + "&password=" + _encode(password);
-        if (samlRequest) loginBody += "&SAMLRequest=" + _encode(samlRequest);
-        if (relayState)  loginBody += "&RelayState="  + _encode(relayState);
-
-        var loginMsg    = _post(helper, idpAction, loginBody);
-        var loginStatus = _status(loginMsg);
-        _log("IdP response status: " + loginStatus);
-
-        var loginRespBody = _body(loginMsg);
-
-        // Handle HTTP 302 redirect from IdP — follow to get SAMLResponse page
-        if (loginStatus === 302) {
-            var location = loginMsg.getResponseHeader().getHeader("Location");
-            if (location) {
-                _log("Following IdP redirect to: " + location);
-                loginMsg      = _getFollowRedirects(helper, location);
-                loginRespBody = _body(loginMsg);
-            }
+        // Flow B fallback: app redirected to w3id directly
+        if (finalUrl.indexOf("w3id.sso.ibm.com") >= 0) {
+            _log("Detected SAML2 flow (redirected to w3id)");
+            return _authenticateSAML(helper, username, password, initMsg, initBody, ssoLoginUrl, appUrl);
         }
 
-        var samlResponse   = _extractHiddenField(loginRespBody, "SAMLResponse");
-        var relayState2    = _extractHiddenField(loginRespBody, "RelayState");
-        var acsUrl         = _extractFormAction(loginRespBody) || (appUrl + "/saml/acs");
-
-        if (!samlResponse) {
-            _log("ERROR: No SAMLResponse found in IdP response — check credentials or SSO URL");
-            // Return the IdP response so ZAP can inspect cookies / response body
-            return loginMsg;
-        }
-
-        // ------------------------------------------------------------------
-        // Step 3 — POST SAMLResponse to Service Provider ACS
-        // ------------------------------------------------------------------
-        _log("Step 3: Posting SAMLResponse to SP ACS: " + acsUrl);
-        var acsBody = "SAMLResponse=" + _encode(samlResponse);
-        if (relayState2) acsBody += "&RelayState=" + _encode(relayState2);
-
-        var acsMsg = _post(helper, acsUrl, acsBody);
-        _log("ACS response status: " + _status(acsMsg));
-
-        // ------------------------------------------------------------------
-        // Step 4 — Verify session by fetching the protected resource again
-        // ------------------------------------------------------------------
-        _log("Step 4: Verifying session...");
-        var verifyMsg  = _getFollowRedirects(helper, appUrl);
-        var verifyBody = _body(verifyMsg);
-        var verifyStat = _status(verifyMsg);
-
-        _log("Verification HTTP status: " + verifyStat);
-
-        var stillOnLoginPage = verifyBody.toLowerCase().indexOf("w3id.sso.ibm.com") >= 0
-                            || verifyBody.toLowerCase().indexOf("sign in") >= 0
-                            || verifyBody.toLowerCase().indexOf("samlrequest") >= 0;
-
-        if (verifyStat === 200 && !stillOnLoginPage) {
-            _log("=== Authentication SUCCESSFUL ===");
-        } else {
-            _log("WARNING: Post-authentication check suggests login may have failed");
-        }
-
-        // ZAP uses the returned message's cookies for subsequent requests
-        return verifyMsg;
+        // Unknown / no SSO detected (app returned 200 without login page)
+        _log("WARNING: No SSO redirect detected (status " + initStat + ") — app may be open or use a different auth method");
+        return initMsg;
 
     } catch (e) {
         _log("EXCEPTION during authentication: " + e);
-        if (e.javaException) {
-            e.javaException.printStackTrace();
-        }
-        // _get/_getFollowRedirects/_post all catch internally — this block is a last safety net
+        if (e.javaException) e.javaException.printStackTrace();
         return _get(helper, appUrl);
     }
 }
 
-/**
- * Required parameter names shown in ZAP context GUI.
- */
-function getRequiredParamsNames() {
-    return ["ICA_APP_URL"];
-}
+// ---------------------------------------------------------------------------
+// Flow A — IBM Cloud OIDC / MTFIM (prepiam.ice.ibmcloud.com)
+// ---------------------------------------------------------------------------
+function _authenticateOIDC(helper, username, password, initMsg, initBody, oidcStartUrl, appUrl) {
+    _log("OIDC Step A1: Fetching IBM Cloud login page from: " + oidcStartUrl);
 
-/**
- * Optional parameter names shown in ZAP context GUI.
- */
-function getOptionalParamsNames() {
-    return ["IBM_SSO_LOGIN_URL"];
-}
+    // Fetch the OIDC start URL (prepiam.ice.ibmcloud.com OIDC authorize endpoint).
+    // This follows HTTP redirects and should land on the actual HTML login form.
+    var loginMsg  = _getFollowRedirects(helper, oidcStartUrl);
+    var loginBody = _body(loginMsg);
+    var loginUrl  = _finalUrl(loginMsg, oidcStartUrl);
+    _log("OIDC login page URL: " + loginUrl + "  status: " + _status(loginMsg));
+    _log("Login body snippet: " + loginBody.substring(0, 300));
 
-/**
- * Credential field names shown in ZAP Users GUI.
- */
-function getCredentialsParamsNames() {
-    return ["username", "password"];
+    // If still no form, try extracting another JS redirect from this page
+    if (!_extractFormAction(loginBody)) {
+        var jsRedirect2 = _extractJsRedirect(loginBody);
+        if (jsRedirect2 && jsRedirect2 !== oidcStartUrl) {
+            _log("OIDC A1b: Following secondary JS redirect to: " + jsRedirect2);
+            loginMsg  = _getFollowRedirects(helper, jsRedirect2);
+            loginBody = _body(loginMsg);
+            loginUrl  = _finalUrl(loginMsg, jsRedirect2);
+            _log("OIDC A1b final URL: " + loginUrl + "  status: " + _status(loginMsg));
+        }
+    }
+
+    // Extract the login form action
+    var formAction = _extractFormAction(loginBody) || loginUrl;
+    if (!formAction.match(/^https?:\/\//)) {
+        // Relative URL — resolve against loginUrl origin
+        var origin = loginUrl.replace(/(https?:\/\/[^\/]+).*/, "$1");
+        formAction = origin + (formAction.charAt(0) === '/' ? '' : '/') + formAction;
+    }
+    _log("OIDC Step A2: POSTing credentials to: " + formAction);
+
+    // Build the POST body — IBM Cloud login form typically uses 'username'/'password'
+    // Extract any hidden fields (state tokens, CSRF, etc.)
+    var postBody = "username=" + _encode(username) + "&password=" + _encode(password);
+    var hiddenFields = _extractAllHiddenFields(loginBody);
+    for (var k in hiddenFields) {
+        if (k !== "username" && k !== "password") {
+            postBody += "&" + _encode(k) + "=" + _encode(hiddenFields[k]);
+        }
+    }
+
+    var loginResp = _post(helper, formAction, postBody);
+    var loginStat = _status(loginResp);
+    var loginRespBody = _body(loginResp);
+    _log("OIDC A2 response status: " + loginStat);
+
+    // May need additional redirect/consent steps
+    if (loginStat === 302 || loginStat === 303) {
+        var loc = _header(loginResp, "Location");
+        if (loc) {
+            _log("OIDC A3: Following post-login redirect to: " + loc);
+            loginResp     = _getFollowRedirects(helper, loc);
+            loginRespBody = _body(loginResp);
+            _log("OIDC A3 final status: " + _status(loginResp));
+        }
+    }
+
+    // Verify by fetching the app again
+    _log("OIDC A4: Verifying session...");
+    var verifyMsg  = _getFollowRedirects(helper, appUrl);
+    var verifyUrl  = _finalUrl(verifyMsg, appUrl);
+    var verifyStat = _status(verifyMsg);
+    _log("Verify status: " + verifyStat + "  URL: " + verifyUrl);
+
+    var authenticated = verifyStat === 200
+        && verifyUrl.indexOf("prepiam") < 0
+        && verifyUrl.indexOf("iam.cloud.ibm.com") < 0
+        && verifyUrl.indexOf("login") < 0;
+
+    if (authenticated) {
+        _log("=== OIDC Authentication SUCCESSFUL ===");
+    } else {
+        _log("WARNING: May not be authenticated — still on login page or unexpected redirect");
+    }
+    return verifyMsg;
 }
 
 // ---------------------------------------------------------------------------
-// Private helpers
+// Flow B — IBM w3id SAML2 POST binding
+// ---------------------------------------------------------------------------
+function _authenticateSAML(helper, username, password, initMsg, initBody, ssoLoginUrl, appUrl) {
+    var samlRequest = _extractHiddenField(initBody, "SAMLRequest");
+    var relayState  = _extractHiddenField(initBody, "RelayState");
+    var idpAction   = _extractFormAction(initBody) || ssoLoginUrl;
+    _log("SAML Step B1: IdP action URL: " + idpAction);
+
+    var loginBody = "username=" + _encode(username) + "&password=" + _encode(password);
+    if (samlRequest) loginBody += "&SAMLRequest=" + _encode(samlRequest);
+    if (relayState)  loginBody += "&RelayState="  + _encode(relayState);
+
+    _log("SAML Step B2: POSTing credentials to IdP...");
+    var loginMsg    = _post(helper, idpAction, loginBody);
+    var loginStatus = _status(loginMsg);
+    var loginRespBody = _body(loginMsg);
+    _log("IdP response status: " + loginStatus);
+
+    if (loginStatus === 302) {
+        var location = _header(loginMsg, "Location");
+        if (location) {
+            _log("Following IdP redirect to: " + location);
+            loginMsg      = _getFollowRedirects(helper, location);
+            loginRespBody = _body(loginMsg);
+        }
+    }
+
+    var samlResponse = _extractHiddenField(loginRespBody, "SAMLResponse");
+    var relayState2  = _extractHiddenField(loginRespBody, "RelayState");
+    var acsUrl       = _extractFormAction(loginRespBody) || (appUrl + "/saml/acs");
+
+    if (!samlResponse) {
+        _log("ERROR: No SAMLResponse found — check credentials or IdP URL");
+        return loginMsg;
+    }
+
+    _log("SAML Step B3: POSTing SAMLResponse to SP ACS: " + acsUrl);
+    var acsBody = "SAMLResponse=" + _encode(samlResponse);
+    if (relayState2) acsBody += "&RelayState=" + _encode(relayState2);
+    var acsMsg = _post(helper, acsUrl, acsBody);
+    _log("ACS response status: " + _status(acsMsg));
+
+    _log("SAML Step B4: Verifying session...");
+    var verifyMsg  = _getFollowRedirects(helper, appUrl);
+    var verifyBody = _body(verifyMsg);
+    var stillOnLogin = verifyBody.toLowerCase().indexOf("w3id.sso.ibm.com") >= 0
+                    || verifyBody.toLowerCase().indexOf("samlrequest") >= 0;
+
+    if (_status(verifyMsg) === 200 && !stillOnLogin) {
+        _log("=== SAML Authentication SUCCESSFUL ===");
+    } else {
+        _log("WARNING: Post-auth check suggests login may have failed");
+    }
+    return verifyMsg;
+}
+
+function getRequiredParamsNames() { return ["ICA_APP_URL"]; }
+function getOptionalParamsNames()  { return ["IBM_SSO_LOGIN_URL"]; }
+function getCredentialsParamsNames() { return ["username", "password"]; }
+
+// ---------------------------------------------------------------------------
+// HTTP helpers
 // ---------------------------------------------------------------------------
 
 /**
- * Build a fresh HttpMessage using HttpRequestHeader's 3-arg constructor:
- *   new HttpRequestHeader(method, uri, version)
+ * Build a fresh HttpMessage using the 3-arg HttpRequestHeader constructor.
  *
- * Key points:
- * - Pass version as the plain JS string "HTTP/1.1", NOT HttpRequestHeader.HTTP11 (the Java
- *   static constant).  In GraalVM JS the constant is a Java String object; the constructor
- *   calls toUpperCase() on it before storing, and that NPEs on a Java String in this context.
- * - Always _htmlDecode the URL before passing to new URI() — &amp; causes URI to return
- *   a broken object whose toString() is null, propagating an NPE in the constructor.
- * - Use URI(url, false) so the URI parser handles & as a query-param separator (not escaped).
+ * CRITICAL: In GraalVM JS, HttpRequestHeader.GET / .POST / .HTTP11 are Java
+ * String objects. Passing them to the constructor causes toUpperCase() to NPE.
+ * Always pass plain JS string literals: "GET", "POST", "HTTP/1.1".
  */
 function _buildMsg(method, url) {
     var cleanUrl = _htmlDecode(String(url));
     var uri      = new URI(cleanUrl, false);
-    // Use plain JS string literal for version — avoids GraalVM Java String toUpperCase NPE
+    // "HTTP/1.1" is a plain JS string literal — NOT HttpRequestHeader.HTTP11
     var header   = new HttpRequestHeader(String(method), uri, "HTTP/1.1");
     return new HttpMessage(header);
 }
 
-/** GET without following redirects. */
 function _get(helper, url) {
     try {
         var msg = _buildMsg("GET", url);
@@ -236,12 +297,11 @@ function _get(helper, url) {
         helper.sendAndReceive(msg, false);
         return msg;
     } catch (e) {
-        _log("WARNING: _get failed for " + url + " : " + e);
+        _log("WARNING: _get failed: " + e);
         return _emptyMsg();
     }
 }
 
-/** GET following all redirects — use for Step 1 where app redirects to IBM SSO. */
 function _getFollowRedirects(helper, url) {
     try {
         var msg = _buildMsg("GET", url);
@@ -251,7 +311,6 @@ function _getFollowRedirects(helper, url) {
         return msg;
     } catch (e) {
         _log("WARNING: _getFollowRedirects failed for " + url + " : " + e);
-        // fall back to no-redirect
         try {
             var msg2 = _buildMsg("GET", url);
             msg2.setRequestBody("");
@@ -265,7 +324,6 @@ function _getFollowRedirects(helper, url) {
     }
 }
 
-/** POST without following redirects. */
 function _post(helper, url, bodyStr) {
     try {
         var msg = _buildMsg("POST", url);
@@ -280,80 +338,103 @@ function _post(helper, url, bodyStr) {
     }
 }
 
-/**
- * Return a minimal valid message that won't NPE downstream.
- * Used only when all network attempts fail.
- */
 function _emptyMsg() {
+    try { return _buildMsg("GET", "https://www.ibm.com/"); } catch (e) { return new HttpMessage(); }
+}
+
+// ---------------------------------------------------------------------------
+// Response helpers
+// ---------------------------------------------------------------------------
+
+function _body(msg) {
+    try { var b = msg.getResponseBody(); return b ? b.toString() : ""; } catch (e) { return ""; }
+}
+
+function _status(msg) {
+    try { var h = msg.getResponseHeader(); return h ? h.getStatusCode() : 0; } catch (e) { return 0; }
+}
+
+function _header(msg, name) {
+    try { var h = msg.getResponseHeader(); return h ? h.getHeader(name) : null; } catch (e) { return null; }
+}
+
+/** Return the final URL after redirect-following (from request header). */
+function _finalUrl(msg, fallback) {
     try {
-        return _buildMsg("GET", "https://www.ibm.com/");
-    } catch (e) {
-        return new HttpMessage();
-    }
+        var uri = msg.getRequestHeader().getURI();
+        return uri ? uri.toString() : (fallback || "");
+    } catch (e) { return fallback || ""; }
 }
 
-/** Safely read a script parameter (paramsValues is a Java Map). */
-function _param(paramsValues, key) {
-    try { return paramsValues.get(key) || null; } catch (e) { return null; }
-}
+// ---------------------------------------------------------------------------
+// HTML/form parsing helpers
+// ---------------------------------------------------------------------------
 
-/**
- * Extract an HTML hidden-field value, e.g.:
- *   <input type="hidden" name="SAMLRequest" value="PHNhbWxwOi..." />
- * Both single- and double-quoted values are handled.
- */
 function _extractHiddenField(html, name) {
-    // Try name="..." value="..." ordering
-    var re1 = new RegExp(
-        'name=["\']' + name + '["\'][^>]*?value=["\']([^"\']+)["\']', 'i');
+    var re1 = new RegExp('name=["\']' + name + '["\'][^>]*?value=["\']([^"\']*)["\']', 'i');
     var m = re1.exec(html);
     if (m) return m[1];
-
-    // Try value="..." name="..." ordering
-    var re2 = new RegExp(
-        'value=["\']([^"\']+)["\'][^>]*?name=["\']' + name + '["\']', 'i');
+    var re2 = new RegExp('value=["\']([^"\']*)["\'][^>]*?name=["\']' + name + '["\']', 'i');
     m = re2.exec(html);
-    if (m) return m[1];
-
-    return null;
-}
-
-/** Extract the action URL from the first <form> tag. */
-function _extractFormAction(html) {
-    var m = /<form[^>]+action=["']([^"']+)["']/i.exec(html);
     return m ? m[1] : null;
 }
 
-/** URL-encode a string using Java. */
+/** Extract all hidden input fields as a key→value map. */
+function _extractAllHiddenFields(html) {
+    var result = {};
+    var re = /<input[^>]+type=["']hidden["'][^>]*>/gi;
+    var match;
+    while ((match = re.exec(html)) !== null) {
+        var tag  = match[0];
+        var name  = _attrVal(tag, "name");
+        var value = _attrVal(tag, "value");
+        if (name) result[name] = value || "";
+    }
+    return result;
+}
+
+function _attrVal(tag, attr) {
+    var re = new RegExp(attr + '=["\']([^"\']*)["\']', 'i');
+    var m  = re.exec(tag);
+    return m ? m[1] : null;
+}
+
+function _extractFormAction(html) {
+    var m = /<form[^>]+action=["']([^"']+)["']/i.exec(html);
+    return m ? _htmlDecode(m[1]) : null;
+}
+
+/**
+ * Extract a client-side JavaScript redirect URL from an HTML page body.
+ * IBM Cloud OIDC apps sometimes return HTTP 200 with window.location= or
+ * meta-refresh instead of a proper HTTP 302 redirect.
+ */
+function _extractJsRedirect(html) {
+    if (!html) return null;
+    var patterns = [
+        /window\.location(?:\.href)?\s*=\s*["']([^"']+)["']/i,
+        /location\.replace\s*\(\s*["']([^"']+)["']\s*\)/i,
+        /location\.href\s*=\s*["']([^"']+)["']/i,
+        /<meta[^>]+http-equiv=["']refresh["'][^>]+content=["'][^;]*;\s*url=([^"']+)["']/i,
+        /<meta[^>]+content=["'][^;]*;\s*url=([^"']+)["'][^>]+http-equiv=["']refresh["']/i
+    ];
+    for (var i = 0; i < patterns.length; i++) {
+        var m = patterns[i].exec(html);
+        if (m && m[1] && m[1].match(/^https?:\/\//)) {
+            return _htmlDecode(m[1].trim());
+        }
+    }
+    return null;
+}
+
 function _encode(str) {
     return java.net.URLEncoder.encode(String(str), "UTF-8");
 }
 
-function _log(msg) {
-    java.lang.System.out.println("[IBM-SSO-Auth] " + msg);
+function _param(paramsValues, key) {
+    try { return paramsValues.get(key) || null; } catch (e) { return null; }
 }
 
-/** Safely get response body as string; returns "" on null/error. */
-function _body(msg) {
-    try {
-        var b = msg.getResponseBody();
-        return b !== null ? b.toString() : "";
-    } catch (e) { return ""; }
-}
-
-/** Safely get response HTTP status code; returns 0 on null/error. */
-function _status(msg) {
-    try {
-        var h = msg.getResponseHeader();
-        return h !== null ? h.getStatusCode() : 0;
-    } catch (e) { return 0; }
-}
-
-/**
- * Decode HTML entities in a string.
- * IBM Toolchain stores property values HTML-encoded when set via the web UI,
- * so &amp; appears literally in the URL instead of &.
- */
 function _htmlDecode(str) {
     if (!str) return str;
     return String(str)
@@ -362,6 +443,10 @@ function _htmlDecode(str) {
         .replace(/&gt;/g,   '>')
         .replace(/&quot;/g, '"')
         .replace(/&#39;/g,  "'");
+}
+
+function _log(msg) {
+    java.lang.System.out.println("[IBM-SSO-Auth] " + msg);
 }
 
 // Made with Bob

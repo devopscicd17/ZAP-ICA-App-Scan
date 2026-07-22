@@ -139,13 +139,15 @@ The error text `Neither 'scriptInline' nor 'script' specified` names the two val
 
 ## `ibm-sso-auth.js` — critical implementation rules
 
-- **Root cause of NPE (confirmed)**: In GraalVM JS (ZAP 2.14+), `HttpRequestHeader.GET`, `.POST`, and `.HTTP11` are Java `String` objects. The `HttpRequestHeader` 3-arg constructor calls `version.toUpperCase()` — on a GraalVM-wrapped Java String this NPEs. Pass plain JS string literals `"GET"`, `"POST"`, `"HTTP/1.1"` instead of Java constants.
-- **Fix**: `_buildMsg(method, url)` uses `new HttpRequestHeader(String(method), uri, "HTTP/1.1")` with a plain JS string literal for version. Never use `HttpRequestHeader.GET/POST/HTTP11` — use `"GET"`, `"POST"`, `"HTTP/1.1"` directly.
-- **Never use `helper.prepareMessage()`** followed by setters — always use `_buildMsg()` instead.
-- **ZAP double-encodes script parameter values**: `paramsValues.get("ICA_APP_URL")` returns `&amp;` even when the YAML has `&`. Always read `ICA_APP_URL` from `java.lang.System.getenv("ICA_APP_URL")` first — the OS env var holds the clean shell-decoded value.
-- Wrap all `sendAndReceive` calls in try/catch — ZAP's internal response parser also calls `version.toUpperCase()` on the response header, which can NPE for 302 redirect responses.
-- Use safe helpers `_body(msg)` and `_status(msg)` — `getResponseBody()` and `getResponseHeader()` can be null if `sendAndReceive` threw.
-- For Step 1 (app immediately 302s to IBM SSO), use `sendAndReceive(msg, true)` (follow redirects).
+- **Root cause of NPE (confirmed)**: In GraalVM JS (ZAP 2.14+), `HttpRequestHeader.GET`, `.POST`, and `.HTTP11` are Java `String` objects. The 3-arg constructor calls `version.toUpperCase()` on them and NPEs. Use plain JS string literals `"GET"`, `"POST"`, `"HTTP/1.1"` — never Java constants.
+- **`_buildMsg(method, url)`** is the only safe way to create messages: `new HttpRequestHeader(String(method), uri, "HTTP/1.1")` → `new HttpMessage(header)`. Never `helper.prepareMessage()`.
+- **ZAP double-encodes `&` in paramsValues**: read `ICA_APP_URL` from `java.lang.System.getenv("ICA_APP_URL")` first — the OS env has the clean value.
+- **Wrap `sendAndReceive` in try/catch** — ZAP's response parser can also NPE on redirect responses.
+- **Two IBM SSO flows** — `ibm-sso-auth.js` auto-detects:
+  - **Flow A (IBM Cloud OIDC / prepiam.ice.ibmcloud.com)**: app returns HTTP 200 with a **JavaScript redirect** (not a 302) — `window.location=`, `location.replace()`, or `<meta http-equiv=refresh>`. `_extractJsRedirect(body)` parses all three patterns; if found and matches `prepiam`/`ibmcloud.com`, routes to `_authenticateOIDC()` which fetches the OIDC authorize endpoint, follows redirects to the HTML login form, POSTs credentials plus all hidden fields (CSRF/state tokens), then follows the post-login redirect. A secondary JS redirect hop is handled in `_authenticateOIDC` itself.
+  - **Flow B (w3id SAML2)**: app redirects to `w3id.sso.ibm.com`, SAMLRequest in hidden field, POST to IdP, SAMLResponse to SP ACS.
+- **`_extractJsRedirect(html)`** — defined at line 412 in `ibm-sso-auth.js`. Checks `window.location`, `location.replace`, `location.href`, and `meta[http-equiv=refresh]`. Returns only full `https?://` URLs after `_htmlDecode`. Called in `authenticate()` (line 89) and as a fallback in `_authenticateOIDC()` (line 147) to follow a second-hop JS redirect when the OIDC authorize URL itself returns another JS page.
+- **DNS resolution**: the ZAP pipeline worker may not resolve `w3id.sso.ibm.com` (external IBM network). Apps using OIDC flow through `prepiam.ice.ibmcloud.com` may also be unreachable if they're on IBM internal network.
 
 ---
 
