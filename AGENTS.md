@@ -139,11 +139,12 @@ The error text `Neither 'scriptInline' nor 'script' specified` names the two val
 
 ## `ibm-sso-auth.js` — critical implementation rules
 
-- `helper.prepareMessage()` returns a message with a **null HTTP version field**. Always call `setVersion(HttpRequestHeader.HTTP11)` **before** `setMethod()` or `setURI()`.
-- **`sendAndReceive` itself can NPE** when the server returns a redirect or malformed response (ZAP's internal response parser calls `version.toUpperCase()` on the response). Always wrap `helper.sendAndReceive()` in its own try/catch inside `_get()` and `_post()`.
-- For Step 1 (initial app access that redirects to IBM SSO), use `helper.sendAndReceive(msg, true)` (follow redirects) — this avoids the NPE that occurs when ZAP processes the raw 302 response.
-- Never `return helper.prepareMessage()` as a fallback — the null version causes NPE downstream. Always perform a real `_get()` call or set version/method/URI explicitly.
-- Use safe helpers `_body(msg)` and `_status(msg)` to read response body/status — `getResponseBody()` and `getResponseHeader()` can return null if `sendAndReceive` failed.
+- **Root cause of NPE**: `HttpRequestHeader.setMethod()` and `setURI()` call `this.version.toUpperCase()` internally. `helper.prepareMessage()` returns a message with `version = null`. All setter chains NPE.
+- **Fix**: Use the 3-arg constructor `new HttpRequestHeader(method, uri, version)` to build the request header atomically, then `new HttpMessage(header)`. This bypasses all setter NPE paths. See `_buildMsg()` in `ibm-sso-auth.js`.
+- **Never use `helper.prepareMessage()`** followed by setters — always use `_buildMsg()` instead.
+- Wrap all `sendAndReceive` calls in try/catch — ZAP's internal response parser also calls `version.toUpperCase()` on the response header, which can NPE for 302 redirect responses.
+- Use safe helpers `_body(msg)` and `_status(msg)` — `getResponseBody()` and `getResponseHeader()` can be null if `sendAndReceive` threw.
+- For Step 1 (app immediately 302s to IBM SSO), use `sendAndReceive(msg, true)` (follow redirects).
 
 ---
 

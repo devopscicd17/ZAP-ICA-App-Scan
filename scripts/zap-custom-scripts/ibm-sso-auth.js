@@ -30,6 +30,7 @@
 // ---------------------------------------------------------------------------
 var HttpRequestHeader = Java.type('org.parosproxy.paros.network.HttpRequestHeader');
 var HttpMessage       = Java.type('org.parosproxy.paros.network.HttpMessage');
+var HttpResponseHeader = Java.type('org.parosproxy.paros.network.HttpResponseHeader');
 // org.apache.commons.httpclient.URI is available in ZAP 2.x
 // org.apache.commons.httpclient3.URI was renamed in some builds — try both
 var URI;
@@ -170,18 +171,8 @@ function authenticate(helper, paramsValues, credentials) {
         if (e.javaException) {
             e.javaException.printStackTrace();
         }
-        // Return a fallback GET to the app URL — never return a bare prepareMessage() since
-        // the HTTP version field is null on a freshly prepared message which causes NPE in ZAP
-        try {
-            return _get(helper, appUrl);
-        } catch (fallbackErr) {
-            _log("EXCEPTION in fallback GET: " + fallbackErr);
-            // Last resort: set the HTTP version so ZAP does not NPE on the version field
-            var lastResort = helper.prepareMessage();
-            lastResort.getRequestHeader().setVersion(HttpRequestHeader.HTTP11);
-            lastResort.getRequestHeader().setMethod(HttpRequestHeader.GET);
-            return lastResort;
-        }
+        // _get/_getFollowRedirects/_post all catch internally — this block is a last safety net
+        return _get(helper, appUrl);
     }
 }
 
@@ -211,80 +202,83 @@ function getCredentialsParamsNames() {
 // ---------------------------------------------------------------------------
 
 /**
- * Perform a GET request WITHOUT following redirects.
+ * Build a fresh HttpMessage using HttpRequestHeader's 3-arg constructor:
+ *   new HttpRequestHeader(method, uri, version)
  *
- * ZAP's HttpRequestHeader has a null `version` field on a freshly prepared
- * message.  Several internal methods (setMethod, setURI, and ZAP's response
- * parser inside sendAndReceive) call version.toUpperCase() and will NPE if
- * version is not set first.  Always call setVersion(HTTP11) before anything
- * else, and wrap sendAndReceive in its own try/catch so a malformed server
- * response does not propagate an NPE up through authenticate().
+ * This bypasses all the setter NPE issues — ZAP's setMethod()/setURI() both
+ * call this.version.toUpperCase() internally and NPE if version is null.
+ * Using the constructor sets all three fields atomically before any getter
+ * or internal method can read version.
  */
+function _buildMsg(method, url) {
+    var uri    = new URI(url, true);
+    var header = new HttpRequestHeader(method, uri, HttpRequestHeader.HTTP11);
+    return new HttpMessage(header);
+}
+
+/** GET without following redirects. */
 function _get(helper, url) {
-    var msg = helper.prepareMessage();
-    msg.getRequestHeader().setVersion(HttpRequestHeader.HTTP11);
-    msg.getRequestHeader().setMethod(HttpRequestHeader.GET);
-    msg.getRequestHeader().setURI(new URI(url, true));
-    msg.setRequestBody("");
-    msg.getRequestHeader().setContentLength(0);
     try {
+        var msg = _buildMsg(HttpRequestHeader.GET, url);
+        msg.setRequestBody("");
+        msg.getRequestHeader().setContentLength(0);
         helper.sendAndReceive(msg, false);
-    } catch (sendErr) {
-        _log("WARNING: sendAndReceive(GET) failed: " + sendErr);
-        if (msg.getResponseHeader() !== null) {
-            try { msg.getResponseHeader().setVersion(HttpRequestHeader.HTTP11); } catch (e2) {}
+        return msg;
+    } catch (e) {
+        _log("WARNING: _get failed for " + url + " : " + e);
+        return _emptyMsg();
+    }
+}
+
+/** GET following all redirects — use for Step 1 where app redirects to IBM SSO. */
+function _getFollowRedirects(helper, url) {
+    try {
+        var msg = _buildMsg(HttpRequestHeader.GET, url);
+        msg.setRequestBody("");
+        msg.getRequestHeader().setContentLength(0);
+        helper.sendAndReceive(msg, true);
+        return msg;
+    } catch (e) {
+        _log("WARNING: _getFollowRedirects failed for " + url + " : " + e);
+        // fall back to no-redirect
+        try {
+            var msg2 = _buildMsg(HttpRequestHeader.GET, url);
+            msg2.setRequestBody("");
+            msg2.getRequestHeader().setContentLength(0);
+            helper.sendAndReceive(msg2, false);
+            return msg2;
+        } catch (e2) {
+            _log("WARNING: _getFollowRedirects fallback also failed: " + e2);
+            return _emptyMsg();
         }
     }
-    return msg;
+}
+
+/** POST without following redirects. */
+function _post(helper, url, bodyStr) {
+    try {
+        var msg = _buildMsg(HttpRequestHeader.POST, url);
+        msg.getRequestHeader().setHeader("Content-Type", "application/x-www-form-urlencoded");
+        msg.setRequestBody(bodyStr);
+        msg.getRequestHeader().setContentLength(msg.getRequestBody().length());
+        helper.sendAndReceive(msg, false);
+        return msg;
+    } catch (e) {
+        _log("WARNING: _post failed for " + url + " : " + e);
+        return _emptyMsg();
+    }
 }
 
 /**
- * Perform a GET request WITH redirect-following enabled.
- * Use for Step 1 where the app immediately 302s to the IBM SSO IdP.
- * ZAP's internal redirect handler avoids the version-null NPE because it
- * re-uses the existing message infrastructure rather than parsing from scratch.
+ * Return a minimal valid message that won't NPE downstream.
+ * Used only when all network attempts fail.
  */
-function _getFollowRedirects(helper, url) {
-    var msg = helper.prepareMessage();
-    msg.getRequestHeader().setVersion(HttpRequestHeader.HTTP11);
-    msg.getRequestHeader().setMethod(HttpRequestHeader.GET);
-    msg.getRequestHeader().setURI(new URI(url, true));
-    msg.setRequestBody("");
-    msg.getRequestHeader().setContentLength(0);
+function _emptyMsg() {
     try {
-        helper.sendAndReceive(msg, true);   // true = follow redirects
-    } catch (sendErr) {
-        _log("WARNING: sendAndReceive(GET+redirects) failed: " + sendErr);
-        // Fall back to no-redirect GET — may land on redirect page instead of IdP
-        try {
-            helper.sendAndReceive(msg, false);
-        } catch (e2) {
-            _log("WARNING: fallback GET also failed: " + e2);
-        }
-        if (msg.getResponseHeader() !== null) {
-            try { msg.getResponseHeader().setVersion(HttpRequestHeader.HTTP11); } catch (e3) {}
-        }
+        return _buildMsg(HttpRequestHeader.GET, "https://www.ibm.com/");
+    } catch (e) {
+        return new HttpMessage();
     }
-    return msg;
-}
-
-function _post(helper, url, bodyStr) {
-    var msg = helper.prepareMessage();
-    msg.getRequestHeader().setVersion(HttpRequestHeader.HTTP11);
-    msg.getRequestHeader().setMethod(HttpRequestHeader.POST);
-    msg.getRequestHeader().setURI(new URI(url, true));
-    msg.getRequestHeader().setHeader("Content-Type", "application/x-www-form-urlencoded");
-    msg.setRequestBody(bodyStr);
-    msg.getRequestHeader().setContentLength(msg.getRequestBody().length());
-    try {
-        helper.sendAndReceive(msg, false);
-    } catch (sendErr) {
-        _log("WARNING: sendAndReceive failed for POST " + url + " : " + sendErr);
-        if (msg.getResponseHeader() !== null) {
-            try { msg.getResponseHeader().setVersion(HttpRequestHeader.HTTP11); } catch (e2) {}
-        }
-    }
-    return msg;
 }
 
 /** Safely read a script parameter (paramsValues is a Java Map). */
