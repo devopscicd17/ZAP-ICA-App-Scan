@@ -115,6 +115,14 @@ setup_environment() {
         fi
         export ICA_APP_URL
     fi
+    # IBM Toolchain stores property values HTML-encoded when set via the web UI.
+    # Decode &amp; → & so the URL is valid when passed to ZAP.
+    # (Other entities like &lt; &gt; are not expected in a URL but decode them too.)
+    ICA_APP_URL="${ICA_APP_URL//&amp;/&}"
+    ICA_APP_URL="${ICA_APP_URL//&lt;/<}"
+    ICA_APP_URL="${ICA_APP_URL//&gt;/>}"
+    ICA_APP_URL="${ICA_APP_URL//&quot;/\"}"
+    export ICA_APP_URL
 
     # IBM_SSO_USERNAME
     if [[ -z "${IBM_SSO_USERNAME:-}" ]]; then

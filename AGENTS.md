@@ -27,6 +27,7 @@ bash scripts/run-ica-authenticated-scan.sh
 - ZAP prepends `/zap/` to any relative path in the automation plan — `./zap-reports/plan.yaml` becomes `/zap/./zap-reports/plan.yaml` (not found). Always use absolute path `/zap/wrk` for `ZAP_REPORT_DIR`.
 - The generated plan is written to `/zap/wrk/automation-plan.yaml` (chmod 600 — it contains credentials).
 - The **workspace directory** (`/workspace/<uuid>/`) is also **read-only** for the `zap` user — `mkdir` inside it fails with "Permission denied". Use `mkdir -p ... 2>/dev/null` with an `if` guard and silently skip the copy if it fails.
+- **IBM Toolchain web UI HTML-encodes property values** — `app_url` set via the UI arrives as `https://...?foo=1&amp;bar=2` (literal `&amp;`). Always decode HTML entities after resolving `ICA_APP_URL`. `run-ica-authenticated-scan.sh` does this with bash string substitution; `ibm-sso-auth.js` does it with `_htmlDecode()`.
 
 ---
 
@@ -138,9 +139,11 @@ The error text `Neither 'scriptInline' nor 'script' specified` names the two val
 
 ## `ibm-sso-auth.js` — critical implementation rules
 
-- `helper.prepareMessage()` returns a message with a **null HTTP version field**. Always call `setVersion(HttpRequestHeader.HTTP11)` **before** `setMethod()` or `setURI()` — ZAP calls `version.toUpperCase()` inside those setters and will NPE if version is null.
-- Never `return helper.prepareMessage()` as a fallback — the null version causes NPE downstream. Always perform a real `_get()` call or set version/method explicitly before returning.
-- The script runs successfully once `setVersion` is called first; authentication proceeds through the SAML2 flow.
+- `helper.prepareMessage()` returns a message with a **null HTTP version field**. Always call `setVersion(HttpRequestHeader.HTTP11)` **before** `setMethod()` or `setURI()`.
+- **`sendAndReceive` itself can NPE** when the server returns a redirect or malformed response (ZAP's internal response parser calls `version.toUpperCase()` on the response). Always wrap `helper.sendAndReceive()` in its own try/catch inside `_get()` and `_post()`.
+- For Step 1 (initial app access that redirects to IBM SSO), use `helper.sendAndReceive(msg, true)` (follow redirects) — this avoids the NPE that occurs when ZAP processes the raw 302 response.
+- Never `return helper.prepareMessage()` as a fallback — the null version causes NPE downstream. Always perform a real `_get()` call or set version/method/URI explicitly.
+- Use safe helpers `_body(msg)` and `_status(msg)` to read response body/status — `getResponseBody()` and `getResponseHeader()` can return null if `sendAndReceive` failed.
 
 ---
 
