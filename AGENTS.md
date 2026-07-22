@@ -139,8 +139,8 @@ The error text `Neither 'scriptInline' nor 'script' specified` names the two val
 
 ## `ibm-sso-auth.js` — critical implementation rules
 
-- **Root cause of NPE**: `HttpRequestHeader.setMethod()` and `setURI()` call `this.version.toUpperCase()` internally. `helper.prepareMessage()` returns a message with `version = null`. All setter chains NPE. Even `setVersion()` NPEs because it normalises the existing value first.
-- **Fix**: Use the 3-arg constructor `new HttpRequestHeader(method, uri, version)` → `new HttpMessage(header)`. Implemented in `_buildMsg()`. Always call `_htmlDecode(String(url))` on the URL before passing to `new URI()` — `&amp;` in a URL causes URI parsing to return null which propagates as NPE.
+- **Root cause of NPE (confirmed)**: In GraalVM JS (ZAP 2.14+), `HttpRequestHeader.GET`, `.POST`, and `.HTTP11` are Java `String` objects. The `HttpRequestHeader` 3-arg constructor calls `version.toUpperCase()` — on a GraalVM-wrapped Java String this NPEs. Pass plain JS string literals `"GET"`, `"POST"`, `"HTTP/1.1"` instead of Java constants.
+- **Fix**: `_buildMsg(method, url)` uses `new HttpRequestHeader(String(method), uri, "HTTP/1.1")` with a plain JS string literal for version. Never use `HttpRequestHeader.GET/POST/HTTP11` — use `"GET"`, `"POST"`, `"HTTP/1.1"` directly.
 - **Never use `helper.prepareMessage()`** followed by setters — always use `_buildMsg()` instead.
 - **ZAP double-encodes script parameter values**: `paramsValues.get("ICA_APP_URL")` returns `&amp;` even when the YAML has `&`. Always read `ICA_APP_URL` from `java.lang.System.getenv("ICA_APP_URL")` first — the OS env var holds the clean shell-decoded value.
 - Wrap all `sendAndReceive` calls in try/catch — ZAP's internal response parser also calls `version.toUpperCase()` on the response header, which can NPE for 302 redirect responses.

@@ -211,24 +211,26 @@ function getCredentialsParamsNames() {
  * Build a fresh HttpMessage using HttpRequestHeader's 3-arg constructor:
  *   new HttpRequestHeader(method, uri, version)
  *
- * This bypasses all the setter NPE issues — ZAP's setMethod()/setURI() both
- * call this.version.toUpperCase() internally and NPE if version is null.
- * Using the constructor sets all three fields atomically before any getter
- * or internal method can read version.
+ * Key points:
+ * - Pass version as the plain JS string "HTTP/1.1", NOT HttpRequestHeader.HTTP11 (the Java
+ *   static constant).  In GraalVM JS the constant is a Java String object; the constructor
+ *   calls toUpperCase() on it before storing, and that NPEs on a Java String in this context.
+ * - Always _htmlDecode the URL before passing to new URI() — &amp; causes URI to return
+ *   a broken object whose toString() is null, propagating an NPE in the constructor.
+ * - Use URI(url, false) so the URI parser handles & as a query-param separator (not escaped).
  */
 function _buildMsg(method, url) {
-    // Decode any residual HTML entities before passing to URI parser.
-    // ZAP's URI class cannot handle &amp; literally — it must be & in the query string.
     var cleanUrl = _htmlDecode(String(url));
-    var uri    = new URI(cleanUrl, false);  // false = url is NOT pre-escaped; let URI parse it
-    var header = new HttpRequestHeader(method, uri, HttpRequestHeader.HTTP11);
+    var uri      = new URI(cleanUrl, false);
+    // Use plain JS string literal for version — avoids GraalVM Java String toUpperCase NPE
+    var header   = new HttpRequestHeader(String(method), uri, "HTTP/1.1");
     return new HttpMessage(header);
 }
 
 /** GET without following redirects. */
 function _get(helper, url) {
     try {
-        var msg = _buildMsg(HttpRequestHeader.GET, url);
+        var msg = _buildMsg("GET", url);
         msg.setRequestBody("");
         msg.getRequestHeader().setContentLength(0);
         helper.sendAndReceive(msg, false);
@@ -242,7 +244,7 @@ function _get(helper, url) {
 /** GET following all redirects — use for Step 1 where app redirects to IBM SSO. */
 function _getFollowRedirects(helper, url) {
     try {
-        var msg = _buildMsg(HttpRequestHeader.GET, url);
+        var msg = _buildMsg("GET", url);
         msg.setRequestBody("");
         msg.getRequestHeader().setContentLength(0);
         helper.sendAndReceive(msg, true);
@@ -251,7 +253,7 @@ function _getFollowRedirects(helper, url) {
         _log("WARNING: _getFollowRedirects failed for " + url + " : " + e);
         // fall back to no-redirect
         try {
-            var msg2 = _buildMsg(HttpRequestHeader.GET, url);
+            var msg2 = _buildMsg("GET", url);
             msg2.setRequestBody("");
             msg2.getRequestHeader().setContentLength(0);
             helper.sendAndReceive(msg2, false);
@@ -266,7 +268,7 @@ function _getFollowRedirects(helper, url) {
 /** POST without following redirects. */
 function _post(helper, url, bodyStr) {
     try {
-        var msg = _buildMsg(HttpRequestHeader.POST, url);
+        var msg = _buildMsg("POST", url);
         msg.getRequestHeader().setHeader("Content-Type", "application/x-www-form-urlencoded");
         msg.setRequestBody(bodyStr);
         msg.getRequestHeader().setContentLength(msg.getRequestBody().length());
@@ -284,7 +286,7 @@ function _post(helper, url, bodyStr) {
  */
 function _emptyMsg() {
     try {
-        return _buildMsg(HttpRequestHeader.GET, "https://www.ibm.com/");
+        return _buildMsg("GET", "https://www.ibm.com/");
     } catch (e) {
         return new HttpMessage();
     }
